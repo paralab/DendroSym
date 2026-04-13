@@ -50,6 +50,9 @@ from . import code_printer
 
 # from .dendro_generator import DendroGenerator
 
+# project generator (template-based, replaces cog)
+from .project_generator import DendroProjectGenerator
+
 # TODO: the package that is used with gw is not currently supported!
 # from . import gw
 

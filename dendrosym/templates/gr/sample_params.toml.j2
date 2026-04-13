@@ -1,0 +1,115 @@
+# ===========================================
+# Parameter file for {{ project_upper }} solver
+# ===========================================
+#
+# AUTO-GENERATED sample by dendrosym project generator.
+#
+# Parameters are organized into sections. The solver reads each key
+# from its section first, then falls back to searching the top level.
+# This means old-style flat files still work.
+
+# ==========================================
+# [solver] - Mesh, time stepping, and I/O
+# ==========================================
+[solver]
+dim = 3
+maxdepth = 16
+mindepth = 3
+ele_order = 6
+
+# Computational domain
+compd_min = [-50.0, -50.0, -50.0]
+compd_max = [50.0, 50.0, 50.0]
+
+# Time stepping
+rk_type = 1                    # 0=RK3, 1=RK4, 2=RK45
+rk_time_begin = 0
+rk_time_end = 800
+rk45_time_step_size = 0.01
+rk45_desired_tol = 0.001
+cfl_factor = 0.25
+
+# I/O
+io_output_freq = 1000
+time_step_output_freq = 10
+checkpt_freq = 5000
+restore_solver = false
+vtu_file_prefix = "vtu/{{ project_name }}_gr"
+chkpt_file_prefix = "cp/{{ project_name }}_cp"
+profile_file_prefix = "{{ project_name }}_prof"
+vtu_x_slice = true
+
+# Mesh management
+dendro_grain_sz = 50
+async_comm_k = 4
+dendro_amr_fac = 0.1
+load_imb_tol = 0.1
+remesh_test_freq = 10
+init_grid_iter = 10
+num_refine_vars = {{ evolution_num_vars }}
+num_evol_vars_vtu_output = {{ evolution_num_vars }}
+num_const_vars_vtu_output = {{ constraint_num_vars }}
+
+# ==========================================
+# [refinement] - AMR settings
+# ==========================================
+[refinement]
+wavelet_tol = 1e-5
+wavelet_tol_max = 1e-3
+use_wavelet_tol_function = 3
+wavelet_tol_function_r0 = 30.0
+wavelet_tol_function_r1 = 220.0
+
+# ==========================================
+# [dissipation] - Kreiss-Oliger
+# ==========================================
+[dissipation]
+ko_diss_sigma = 0.4
+use_const_ko = false
+
+# ==========================================
+# [physics] - Equation-specific parameters
+#
+# These correspond to the ParameterVariable objects
+# defined in the Python equation config. Use the short
+# name (no project prefix needed).
+# ==========================================
+[physics]
+{% for pvar in physics_params | default([]) %}
+# {{ pvar.description }}
+{{ pvar.toml_key }} = {{ pvar.toml_default }}
+{% endfor %}
+
+# ==========================================
+# [initial_data]
+# ==========================================
+[initial_data]
+id_type = 0                    # 0 = TwoPunctures, etc.
+
+tpid_file_prefix = "{{ project_name }}_id"
+par_b = 4.0
+par_m_plus = 0.5
+par_m_minus = 0.5
+par_P_plus = [0.0, 0.1, 0.0]
+par_P_minus = [0.0, -0.1, 0.0]
+par_S_plus = [0.0, 0.0, 0.0]
+par_S_minus = [0.0, 0.0, 0.0]
+center_offset = [0.0, 0.0, 0.0]
+give_bare_mass = 1
+initial_lapse = 2
+
+# ==========================================
+# [wave_extraction]
+# ==========================================
+[wave_extraction]
+num_radaii = 6
+extraction_radius = 100.0
+num_lmodes = 9
+
+# ==========================================
+# [logging]
+# ==========================================
+[logging]
+log_file = "logfile"
+log_file_level = 1
+log_console_level = 2

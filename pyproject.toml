@@ -12,6 +12,8 @@ networkx = "^3.1"
 sympy = "^1.12"
 dill = "^0.3.8"
 tomlkit = "^0.11.8"
+jinja2 = "^3.1"
+tqdm = "^4.60"
 
 [tool.poetry.scripts]
 dendro-build = "dendrosym.cli:main"
