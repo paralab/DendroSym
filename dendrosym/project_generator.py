@@ -36,6 +36,26 @@ def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+def _rewrite_deriv_calls(code: str, deriv_obj: str) -> str:
+    """Rewrite legacy derivative calls to use a DendroDerivatives object.
+
+    Transforms:
+        deriv_x(out, in, hx, sz, bflag)   ->  DERIVS->grad_x(out, in, hx, sz, bflag)
+        deriv_xx(out, in, hx, sz, bflag)   ->  DERIVS->grad_xx(out, in, hx, sz, bflag)
+        deriv_yy(...)                       ->  DERIVS->grad_yy(...)
+
+    Leaves advective derivatives (adv_deriv_x) unchanged.
+    """
+    import re
+    # Match deriv_x, deriv_y, deriv_z, deriv_xx, deriv_yy, deriv_zz, deriv_xy, etc.
+    # but NOT adv_deriv_x or ko_deriv_x
+    pattern = r'(?<![a-zA-Z_])deriv_(x{1,2}|y{1,2}|z{1,2}|xy|xz|yz)\('
+    def replacer(m):
+        suffix = m.group(1)
+        return f'{deriv_obj}->grad_{suffix}('
+    return re.sub(pattern, replacer, code)
+
+
 # ---------------------------------------------------------------------------
 # Main generator
 # ---------------------------------------------------------------------------
@@ -64,7 +84,8 @@ class DendroProjectGenerator:
     # Public API
     # ------------------------------------------------------------------
 
-    def generate(self, output_dir: str, *, skip_gencode: bool = False):
+    def generate(self, output_dir: str, *, skip_gencode: bool = False,
+                 gencode_only: bool = False):
         """Generate the full solver project into *output_dir*.
 
         Parameters
@@ -89,13 +110,16 @@ class DendroProjectGenerator:
         else:
             print("Skipping gencode (skip_gencode=True)", file=sys.stderr)
 
-        # 3. Render templates -> src/ and include/
-        print("Rendering templates...", file=sys.stderr)
-        self._render_templates(output, ctx)
+        if not gencode_only:
+            # 3. Render templates -> src/ and include/
+            print("Rendering templates...", file=sys.stderr)
+            self._render_templates(output, ctx)
 
-        # 4. Copy static files (derivs, etc.)
-        print("Copying static files...", file=sys.stderr)
-        self._copy_static_files(output)
+            # 4. Copy static files (derivs, etc.)
+            print("Copying static files...", file=sys.stderr)
+            self._copy_static_files(output)
+        else:
+            print("Skipping templates (gencode_only=True)", file=sys.stderr)
 
         print(f"Project generated in {output}", file=sys.stderr)
 
@@ -150,8 +174,12 @@ class DendroProjectGenerator:
 
         # -- physics parameter metadata (for parameters.h/cpp and sample TOML)
         physics_params = []
+        seen_param_names = set()
         for param_subtype, param_list in c.all_vars.get("parameter", {}).items():
             for pvar in param_list:
+                if pvar.var_name in seen_param_names:
+                    continue
+                seen_param_names.add(pvar.var_name)
                 toml_key = pvar.var_name
                 cpp_var = f"{c.project_upper}_{pvar.var_name.upper()}"
 
@@ -189,6 +217,16 @@ class DendroProjectGenerator:
             ctx[f"{vt}_ko_code"] = ""
         ctx["evolution_constraint_enforcement"] = ""
 
+        # -- feature flags (templates use these to conditionally include code)
+        ctx["enable_bh_tracking"] = getattr(c, "enable_bh_tracking", False)
+        ctx["enable_gw_extraction"] = getattr(c, "enable_gw_extraction", False)
+        ctx["enable_tpid"] = getattr(c, "enable_tpid", False)
+
+        # -- derivative system: if set, emits DendroDerivatives method calls
+        # e.g. "SOLVER_DERIVS" -> SOLVER_DERIVS->grad_x(...)
+        ctx["deriv_obj"] = getattr(c, "deriv_obj", "")
+        ctx["use_dendro_derivs"] = ctx["deriv_obj"] != ""
+
         return ctx
 
     # ------------------------------------------------------------------
@@ -223,6 +261,12 @@ class DendroProjectGenerator:
             alloc_file = f"{prefix}_{vt}_deriv_memalloc.cpp.inc"
             calc_file = f"{prefix}_{vt}_deriv_calc.cpp.inc"
             dealloc_file = f"{prefix}_{vt}_deriv_memdealloc.cpp.inc"
+
+            # If using DendroDerivatives object, rewrite the legacy
+            # deriv_x(...) calls to DERIVS->grad_x(...) style
+            deriv_obj_name = ctx.get("deriv_obj", "")
+            if deriv_obj_name:
+                deriv_calc = _rewrite_deriv_calls(deriv_calc, deriv_obj_name)
 
             (gencode_dir / alloc_file).write_text(deriv_alloc)
             (gencode_dir / calc_file).write_text(deriv_calc)

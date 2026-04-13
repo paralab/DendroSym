@@ -1342,9 +1342,17 @@ class DendroConfiguration:
         return return_text
 
     def gen_grad_calculations(
-        self, var_type: str, grad_type: str = "grad", use_eqns=False
+        self, var_type: str, grad_type: str = "grad", use_eqns=False,
+        deriv_obj: str = ""
     ):
-        """"""
+        """Generate derivative computation code.
+
+        Parameters
+        ----------
+        deriv_obj : str
+            If set (e.g. "SOLVER_DERIVS"), emits method calls like
+            SOLVER_DERIVS->grad_x(...) instead of legacy deriv_x(...).
+        """
         if use_eqns:
             pass
 
@@ -1355,7 +1363,9 @@ class DendroConfiguration:
 
             grad_vars.sort()
 
-            return_text = dendrosym.codegen.generate_deriv_comp(grad_vars)
+            return_text = dendrosym.codegen.generate_deriv_comp(
+                grad_vars, deriv_obj=deriv_obj
+            )
 
         return return_text
 
@@ -2718,8 +2728,16 @@ class DendroConfiguration:
         var_type="evolution",
         include_byte_declaration=False,
         use_old_method=False,
+        deriv_obj: str = "",
     ):
-        """Generates all of the C++ code for allocation and calculation of derivatives"""
+        """Generates all of the C++ code for allocation and calculation of derivatives.
+
+        Parameters
+        ----------
+        deriv_obj : str
+            If set (e.g. "SOLVER_DERIVS"), emits DendroDerivatives method calls
+            like SOLVER_DERIVS->grad_x(...) instead of legacy deriv_x(...).
+        """
 
         # get the RHS stuff
         temp_funcs = self.stored_rhs_function[var_type]
@@ -2738,7 +2756,8 @@ class DendroConfiguration:
                 "grad",
                 include_byte_declaration=include_byte_declaration,
             )
-            grad_calc = self.gen_grad_calculations(var_type, "grad")
+            grad_calc = self.gen_grad_calculations(var_type, "grad",
+                                                    deriv_obj=deriv_obj)
             grad_dealloc = self.gen_grad_memory_dealloc(var_type, "grad")
 
             orig_vars = self.all_var_names.get(var_type, [])

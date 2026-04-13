@@ -1394,9 +1394,17 @@ def generate_memory_dealloc(var_names: list):
     return return_text
 
 
-def generate_deriv_comp(var_names: list, adv_der_var: str = "beta"):
+def generate_deriv_comp(var_names: list, adv_der_var: str = "beta",
+                        deriv_obj: str = ""):
     # map dir
     dir_map = {"0": "x", "1": "y", "2": "z"}
+
+    # When deriv_obj is set (e.g. "SOLVER_DERIVS"), emit method calls like:
+    #   SOLVER_DERIVS->grad_x(out, in, hx, sz, bflag);
+    # When empty, emit legacy function calls like:
+    #   deriv_x(out, in, hx, sz, bflag);
+    use_obj = deriv_obj != ""
+    prefix = f"{deriv_obj}->" if use_obj else ""
 
     return_text = ""
 
@@ -1410,10 +1418,17 @@ def generate_deriv_comp(var_names: list, adv_der_var: str = "beta"):
             va_name = "".join(short_text + "_" for short_text in split_va[2:])[:-1]
             # get the direction
             the_dir = dir_map[split_va[1]]
-            # if it's grad, then it's a one dimensional derivative
-            return_text += (
-                f"deriv_{the_dir}({va}, {va_name}, " + f"h{the_dir}, sz, bflag);\n"
-            )
+            # first-order derivative: grad_x, grad_y, or grad_z
+            if use_obj:
+                return_text += (
+                    f"{prefix}grad_{the_dir}({va}, {va_name}, "
+                    + f"h{the_dir}, sz, bflag);\n"
+                )
+            else:
+                return_text += (
+                    f"deriv_{the_dir}({va}, {va_name}, "
+                    + f"h{the_dir}, sz, bflag);\n"
+                )
 
         elif split_va[0] == "grad2":
             # get the original var name from the string, just in case
@@ -1428,37 +1443,38 @@ def generate_deriv_comp(var_names: list, adv_der_var: str = "beta"):
             the_dir2 = dir_map[dir_int2]
 
             if the_dir == the_dir2:
-                # if it's grad, then it's a one dimensional derivative
-                return_text += (
-                    f"deriv_{the_dir}{the_dir}({va}, {va_name}, "
-                    + f"h{the_dir}, sz, bflag);\n"
-                )
+                # second-order same-direction: grad_xx, grad_yy, or grad_zz
+                if use_obj:
+                    return_text += (
+                        f"{prefix}grad_{the_dir}{the_dir}({va}, {va_name}, "
+                        + f"h{the_dir}, sz, bflag);\n"
+                    )
+                else:
+                    return_text += (
+                        f"deriv_{the_dir}{the_dir}({va}, {va_name}, "
+                        + f"h{the_dir}, sz, bflag);\n"
+                    )
 
             else:
-                # this is if we have different directions
-                # knowing how the code is generated, this will be done
-                # by taking the variable from before and calculating it
+                # mixed second-order: compute from the first-direction gradient
+                if use_obj:
+                    grad2_str = f"{prefix}grad_{the_dir2}({va}, "
+                else:
+                    grad2_str = f"deriv_{the_dir2}({va}, "
 
-                # we assume the first direction is saved, then we
-                # use it to calculate the second
-                grad2_str = f"deriv_{the_dir2}({va}, "
-
-                # then build up the grad string from the original direction
                 grad2_str += (
                     f"grad_{dir_int}_" + va_name + f", h{the_dir2}, sz, bflag);\n"
                 )
 
                 return_text += grad2_str
-                # TODO: potentially make it so that the order is "ordered"?
 
         elif split_va[0] == "agrad":
-            # get the original var name from the string, just in case
-            # there are more underscores
+            # advective derivative
             va_name = "".join(short_text + "_" for short_text in split_va[2:])[:-1]
-            # get the direction
             the_dir = dir_map[split_va[1]]
             dir_idx = split_va[1]
-            # then stitch it together
+            # advective derivatives keep the legacy pattern for now
+            # since DendroDerivatives doesn't have an advective method
             return_text += (
                 f"adv_deriv_{the_dir}({va}, {va_name}, "
                 + f"h{the_dir}, sz, {adv_der_var}{dir_idx}, bflag);\n"

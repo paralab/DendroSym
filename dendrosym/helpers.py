@@ -39,7 +39,10 @@ class _DerTransformer:
                     e = e.func(*new_args)
 
             # process current node once it's children have been processed
-            if isinstance(e, sym.Function):
+            # Only check user-defined functions (grad, grad2, agrad).
+            # Built-in functions like exp, sin, cos are also sym.Function
+            # but don't have a .name attribute in the same way.
+            if isinstance(e, sym.Function) and hasattr(e, 'name'):
                 if e.name == "grad":
                     # simple symbol substitution
                     dim, arg = e.args
