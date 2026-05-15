@@ -21,6 +21,17 @@ ele_order = 6
 compd_min = [-50.0, -50.0, -50.0]
 compd_max = [50.0, 50.0, 50.0]
 
+# Block-adaptive mesh (BSSN-style): when true, the initial octree is a
+# uniform grid at `mindepth` over [blk_min_*, blk_max_*] and AMR is off;
+# when false (default), function2Octree drives wavelet-based AMR.
+enable_block_adaptivity = false
+blk_min_x = -50.0
+blk_min_y = -50.0
+blk_min_z = -50.0
+blk_max_x =  50.0
+blk_max_y =  50.0
+blk_max_z =  50.0
+
 # Time stepping
 rk_type = 1                    # 0=RK3, 1=RK4, 2=RK45
 rk_time_begin = 0
@@ -37,7 +48,12 @@ restore_solver = false
 vtu_file_prefix = "vtu/{{ project_name }}_gr"
 chkpt_file_prefix = "cp/{{ project_name }}_cp"
 profile_file_prefix = "{{ project_name }}_prof"
-vtu_x_slice = true
+
+# VTU slice planes — set any to true for that 2D slice only; all false
+# emits full 3D meshes (much heavier). BSSN convention uses z_slice.
+vtu_x_slice = false
+vtu_y_slice = false
+vtu_z_slice = true
 
 # Mesh management
 dendro_grain_sz = 50
@@ -66,6 +82,30 @@ wavelet_tol_function_r1 = 220.0
 [dissipation]
 ko_diss_sigma = 0.4
 use_const_ko = false
+
+# ==========================================
+# [derivatives] - dendrolib DendroDerivatives
+#
+# Pick the FD/compact stencil for first and second derivatives. Valid type
+# names live in dendrolib's derivs_factory.h. ele_order=6 across the suite,
+# so pick order-6-compatible variants:
+#   "E6"                       -- explicit centered FD (default, robust)
+#   "E6Matrix"                 -- matrix form of explicit
+#   "JTT6" / "JTP6"            -- Jonathan Tyler compact, 6th order
+#   "A6_1".."A6_8"             -- BYU A6 parameterized family
+#   "C6_1".."C6_7"             -- BYU C6 family
+#   "KIMBYU_1".."KIMBYU_19"    -- Kim-BYU hybrid family
+# matid_* picks parameterized-scheme variant; filter_* sets in-matrix filter;
+# post_rhs_filter sets post-RHS filter.
+# ==========================================
+[derivatives]
+type_first = "E6"
+type_second = "E6"
+matid_first = 1
+matid_second = 1
+filter_first = "none"
+filter_second = "none"
+post_rhs_filter = "default"
 
 # ==========================================
 # [physics] - Equation-specific parameters
@@ -105,6 +145,15 @@ initial_lapse = 2
 num_radaii = 6
 extraction_radius = 100.0
 num_lmodes = 9
+
+{% if enable_ah %}
+# ==========================================
+# [apparent_horizon] - BHaHAHA horizon finder
+# ==========================================
+[apparent_horizon]
+# set to 0 to disable, or N to run every N steps
+solver_freq = 0
+{% endif %}
 
 # ==========================================
 # [logging]

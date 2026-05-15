@@ -20,6 +20,7 @@
 #include <utility>
 
 #include "dendro.h"
+#include "dvec.h"
 #include "ctx.h"
 #include "grDef.h"
 #include "parameters.h"
@@ -29,10 +30,16 @@
 
 namespace {{ namespace }} {
 
+typedef ot::DVector<DendroScalar, unsigned int> DVec;
+
 /**@brief Storage slots for zipped/unzipped variable vectors. */
 enum VL {
     CPU_EV = 0,        // zipped evolution variables (primary storage)
     CPU_CV,            // zipped constraint variables
+{% if enable_analytical %}
+    CPU_ANALYTIC,      // analytical solution (zipped, for output)
+    CPU_ANALYTIC_DIFF, // numerical - analytical difference (zipped, for output)
+{% endif %}
     CPU_EV_UZ_IN,      // unzipped evolution (input to RHS)
     CPU_EV_UZ_OUT,     // unzipped evolution (output from RHS)
     CPU_CV_UZ_IN,      // unzipped constraint (input)
@@ -93,6 +100,21 @@ class {{ project_upper }}Ctx : public ts::Ctx<{{ project_upper }}Ctx, DendroScal
     void compute_constraint_variables();
     int extract_constraints();
 
+{% if enable_analytical %}
+    // ---- Analytical solution ----
+    void compute_analytical();
+{% endif %}
+
+{% if enable_gw_extraction %}
+    // ---- Gravitational wave extraction ----
+    int extract_gravitational_waves();
+{% endif %}
+
+{% if enable_ah %}
+    // ---- Apparent horizon finder ----
+    void findAH();
+{% endif %}
+
     // ---- Output ----
     int write_vtu();
     int terminal_output();
@@ -119,6 +141,7 @@ class {{ project_upper }}Ctx : public ts::Ctx<{{ project_upper }}Ctx, DendroScal
     // ---- Accessors ----
     DVec &get_evolution_vars() { return m_var[VL::CPU_EV]; }
     DVec &get_constraint_vars() { return m_var[VL::CPU_CV]; }
+    ot::Mesh *get_mesh() { return m_uiMesh; }
 
     void prepare_for_next_iter();
 };

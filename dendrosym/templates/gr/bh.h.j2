@@ -1,0 +1,21 @@
+/**
+ * @file bh.h
+ * @brief BH struct for the {{ project_name }} solver.
+ *
+ * Wraps the generic dendro_gr::BH struct, adding a project-specific
+ * namespace alias. If your theory needs extra BH fields (e.g., charge),
+ * extend this struct here.
+ */
+
+#ifndef {{ project_upper }}_BH_H
+#define {{ project_upper }}_BH_H
+
+// use the generic BH struct from dendrolib GR/
+#include "dendro_gr_bh.h"
+
+namespace {{ namespace }} {
+    // alias the generic BH struct into our namespace
+    using BH = dendro_gr::BH;
+}  // namespace {{ namespace }}
+
+#endif  // {{ project_upper }}_BH_H

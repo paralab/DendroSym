@@ -13,7 +13,9 @@
 #include <iostream>
 
 #include "block.h"
-#include "derivs.h"
+{% if use_dendro_derivs %}
+#include "derivatives.h"
+{% endif %}
 #include "grDef.h"
 #include "mathUtils.h"
 #include "parameters.h"

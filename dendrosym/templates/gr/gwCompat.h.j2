@@ -1,0 +1,39 @@
+/**
+ * @file gwCompat.h
+ * @brief Compatibility aliases for gwExtract.h from dendrolib.
+ *
+ * gwExtract.h was originally written for the BSSN solver and references
+ * BSSN-prefixed globals. This header creates aliases so it works with
+ * any formulation. Include this BEFORE gwExtract.h.
+ *
+ * TODO: refactor gwExtract.h in dendrolib to take a config struct
+ * instead of reading globals, then remove this file.
+ */
+
+#ifndef {{ project_upper }}_GW_COMPAT_H
+#define {{ project_upper }}_GW_COMPAT_H
+
+// alias domain bounds from project namespace to bssn:: namespace that gwExtract expects
+namespace bssn {
+    static const double *BSSN_COMPD_MIN = {{ namespace }}::{{ project_upper }}_COMPD_MIN;
+    static const double *BSSN_COMPD_MAX = {{ namespace }}::{{ project_upper }}_COMPD_MAX;
+    static const double *BSSN_OCTREE_MIN = {{ namespace }}::{{ project_upper }}_OCTREE_MIN;
+    static const double *BSSN_OCTREE_MAX = {{ namespace }}::{{ project_upper }}_OCTREE_MAX;
+    static const std::string &BSSN_PROFILE_FILE_PREFIX = {{ namespace }}::{{ project_upper }}_PROFILE_FILE_PREFIX;
+
+    // constraint enum alias
+    using VAR_CONSTRAINT = {{ namespace }}::VAR_CONSTRAINT;
+}
+
+// alias GW parameters to BSSN_GW_* names
+#define BSSN_GW_NUM_RADAII GW::{{ project_upper }}_GW_NUM_RADAII
+#define BSSN_GW_RADAII GW::{{ project_upper }}_GW_RADAII
+#define BSSN_GW_NUM_LMODES GW::{{ project_upper }}_GW_NUM_LMODES
+#define BSSN_GW_L_MODES GW::{{ project_upper }}_GW_L_MODES
+
+// output precision alias
+namespace GW {
+    static const unsigned int BSSN_GW_OUTPUT_PRECISION = {{ project_upper }}_GW_OUTPUT_PRECISION;
+}
+
+#endif  // {{ project_upper }}_GW_COMPAT_H

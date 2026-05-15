@@ -69,13 +69,25 @@ unsigned int {{ project_upper }}_PADDING_WIDTH = {{ project_upper }}_ELE_ORDER >
 double {{ project_upper }}_COMPD_MIN[3] = {-50.0, -50.0, -50.0};
 double {{ project_upper }}_COMPD_MAX[3] = {50.0, 50.0, 50.0};
 double {{ project_upper }}_OCTREE_MIN[3] = {0.0, 0.0, 0.0};
+// MAXDEPTH declared before OCTREE_MAX — TU static init runs in declaration
+// order, so the OCTREE_MAX initializer reads the correct value
+unsigned int {{ project_upper }}_MAXDEPTH = 16;
+unsigned int {{ project_upper }}_MINDEPTH = 3;
+
+// BSSN-style toggle: true = uniform grid at MINDEPTH inside [BLK_MIN, BLK_MAX],
+// AMR off; false = function2Octree (wavelet-driven AMR)
+bool {{ project_upper }}_ENABLE_BLOCK_ADAPTIVITY = false;
+double {{ project_upper }}_BLK_MIN_X = -50.0;
+double {{ project_upper }}_BLK_MIN_Y = -50.0;
+double {{ project_upper }}_BLK_MIN_Z = -50.0;
+double {{ project_upper }}_BLK_MAX_X = 50.0;
+double {{ project_upper }}_BLK_MAX_Y = 50.0;
+double {{ project_upper }}_BLK_MAX_Z = 50.0;
 double {{ project_upper }}_OCTREE_MAX[3] = {
     (double)(1u << {{ project_upper }}_MAXDEPTH),
     (double)(1u << {{ project_upper }}_MAXDEPTH),
     (double)(1u << {{ project_upper }}_MAXDEPTH)};
 unsigned int {{ project_upper }}_DIM = 3;
-unsigned int {{ project_upper }}_MAXDEPTH = 16;
-unsigned int {{ project_upper }}_MINDEPTH = 3;
 
 unsigned int {{ project_upper }}_RK_TIME_BEGIN = 0;
 unsigned int {{ project_upper }}_RK_TIME_END = 800;
@@ -130,6 +142,22 @@ double {{ project_upper }}_WAVELET_TOL_FUNCTION_R0 = 30.0;
 double {{ project_upper }}_WAVELET_TOL_FUNCTION_R1 = 220.0;
 RefinementMode {{ project_upper }}_REFINEMENT_MODE = static_cast<RefinementMode>(0);
 
+double {{ project_upper }}_GRID_MIN_X = -400.0;
+double {{ project_upper }}_GRID_MIN_Y = -400.0;
+double {{ project_upper }}_GRID_MIN_Z = -400.0;
+double {{ project_upper }}_GRID_MAX_X = 400.0;
+double {{ project_upper }}_GRID_MAX_Y = 400.0;
+double {{ project_upper }}_GRID_MAX_Z = 400.0;
+unsigned int {{ project_upper }}_SPLIT_FIX = 2;
+// ENABLE_BLOCK_ADAPTIVITY defined above as bool
+
+{% if num_derivatives is defined %}
+unsigned int {{ project_upper }}_NUM_DERIVATIVES = {{ num_derivatives }};
+{% else %}
+// TODO: auto-compute this from the equation generation
+unsigned int {{ project_upper }}_NUM_DERIVATIVES = 200;
+{% endif %}
+
 std::string DENDRO_LOG_FILE = "logfile";
 int DENDRO_LOG_FILE_LEVEL = 1;
 int DENDRO_LOG_CONSOLE_LEVEL = 2;
@@ -143,15 +171,102 @@ unsigned int DISSIPATION_TYPE = 0;
 double {{ project_upper }}_CURRENT_MIN_DX = ({{ project_upper }}_COMPD_MAX[0] - {{ project_upper }}_COMPD_MIN[0]) *
                              (1.0 / (double)(1u << {{ project_upper }}_MAXDEPTH));
 
-// TODO: additional physics parameters from equation config go here
+// evolution constraint floors (for pos_floor constraints)
+{% for vname in pos_floor_vars | default(['chi', 'alpha']) %}
+double {{ vname | upper }}_FLOOR = {% if vname | lower == 'alpha' %}0.1{% else %}1e-4{% endif %};
+{% endfor %}
+
+// initial data type (set from toml [initial_data] section)
+unsigned int {{ project_upper }}_ID_TYPE = 0;
+
+// [physics] parameters from equation config
+{% for pvar in physics_params | default([]) %}
+{{ pvar.definition }}
+{% endfor %}
+
+{% if use_dendro_derivs %}
+// DendroDerivatives system -- see dendrolib's derivs_factory.h for the full
+// list of stencil names (E4/E6/E8, KIM*, BYU*, A4/A6/B4/B6/C4/C6, etc.)
+std::unique_ptr<dendroderivs::DendroDerivatives> {{ project_upper }}_DERIVS = nullptr;
+std::string {{ project_upper }}_DERIVTYPE_FIRST = "E6";
+std::string {{ project_upper }}_DERIVTYPE_SECOND = "E6";
+std::vector<double> {{ project_upper }}_DERIV_FIRST_COEFFS = {};
+std::vector<double> {{ project_upper }}_DERIV_SECOND_COEFFS = {};
+unsigned int {{ project_upper }}_DERIV_FIRST_MATID = 1;
+unsigned int {{ project_upper }}_DERIV_SECOND_MATID = 1;
+std::string {{ project_upper }}_INMATFILT_FIRST = "none";
+std::string {{ project_upper }}_INMATFILT_SECOND = "none";
+std::vector<double> {{ project_upper }}_INMATFILT_FIRST_COEFFS = {};
+std::vector<double> {{ project_upper }}_INMATFILT_SECOND_COEFFS = {};
+std::string {{ project_upper }}_POST_RHS_FILTER = "default";
+{% endif %}
 
 }  // namespace {{ namespace }}
 
+{% if enable_ah %}
+#ifdef SOLVER_ENABLE_AH
+namespace AH {
+
+std::unique_ptr<dendro_aeh::AEH_BHaHAHA> ah_finder = nullptr;
+unsigned int AH_SOLVER_FREQ = 0;
+
+// defaults for 3 horizons (2 individual + 1 common for BBH)
+unsigned int N_HORIZONS                         = 3;
+unsigned int N_RESOLUTIONS_MULTIGRID            = 3;
+std::vector<int> MAX_ITERATIONS                 = {10000, 10000, 10000};
+std::vector<double> INITIAL_X_CENTER            = {0.0, 0.0, 0.0};
+std::vector<double> INITIAL_Y_CENTER            = {0.0, 0.0, 0.0};
+std::vector<double> INITIAL_Z_CENTER            = {0.0, 0.0, 0.0};
+std::vector<double> M_SCALE                     = {0.0, 0.0, 0.0};
+std::vector<double> CFL_FACTOR                  = {1.0, 1.0, 1.0};
+std::vector<double> THETA_L2_M_TOL              = {1.e-5, 1.e-5, 1.e-5};
+std::vector<double> THETA_LINF_M_TOL            = {1.e-2, 1.e-2, 1.e-2};
+std::vector<double> ETA_DAMP_M                  = {7.0, 7.0, 7.0};
+std::vector<double> KO_STRENGTH                 = {0.0, 0.0, 0.0};
+std::vector<double> MAX_SEARCH_RADIUS           = {1.5, 1.5, 1.5};
+std::vector<int> NR_INTERP_MAX                  = {48, 48, 48};
+int NTHETA_MAX                                  = 32;
+int NPHI_MAX                                    = 64;
+std::string AH_SAVE_DIR                         = "";
+int NUM_RESOLUTIONS_AFTER_FIND                  = 3;
+std::vector<int> NTHETA_ARRAY                   = {8, 16, 32};
+std::vector<int> NPHI_ARRAY                     = {16, 32, 64};
+int ENABLE_ETA_VARYING_ALG                      = 0;
+int VERBOSITY_LEVEL                             = 1;
+
+// which evolution variables BHaHAHA needs (chi, trK, At[6], gt[6])
+// NOTE: these indices must match the VAR enum order for this formulation.
+// the generator fills this from the python config's variable ordering.
+// order must be: chi, trK, At[6 symmetric], gt[6 symmetric]
+// to match the transform lambda below
+const std::vector<int> AH_INDICES = {
+{% for vname in evolution_var_names %}{% if vname == 'chi' %}    {{ namespace }}::VAR::U_{{ vname | upper }},
+{% endif %}{% endfor %}
+{% for vname in evolution_var_names %}{% if vname in ['trK', 'K'] %}    {{ namespace }}::VAR::U_{{ vname | upper }},
+{% endif %}{% endfor %}
+{% for vname in evolution_var_names %}{% if vname.startswith('At') or vname.startswith('At_mat') %}    {{ namespace }}::VAR::U_{{ vname | upper }},
+{% endif %}{% endfor %}
+{% for vname in evolution_var_names %}{% if vname.startswith('gt') or vname.startswith('gt_mat') %}    {{ namespace }}::VAR::U_{{ vname | upper }},
+{% endif %}{% endfor %}
+};
+
+}  // namespace AH
+#endif
+{% endif %}
+
+{% if enable_gw_extraction %}
 namespace GW {
 unsigned int {{ project_upper }}_GW_NUM_RADAII = 6;
+unsigned int {{ project_upper }}_GW_RADAII[6] = {50, 60, 70, 80, 90, 100};
 unsigned int {{ project_upper }}_GW_NUM_LMODES = 9;
-double {{ project_upper }}_GW_EXTRACTION_RADIUS = 100.0;
+unsigned int {{ project_upper }}_GW_L_MODES[9] = {2, 3, 4, 5, 6, 7, 8, 9, 10};
 }  // namespace GW
+{% endif %}
+
+namespace {{ namespace }} {
+// gw extraction frequency
+unsigned int {{ project_upper }}_GW_EXTRACT_FREQ = 0;  // 0 = disabled
+}  // namespace {{ namespace }}
 
 {% if enable_tpid %}
 namespace TPID {
@@ -175,6 +290,18 @@ double initial_lapse_psi_exponent = -2.0;
 unsigned int npoints_A = 60;
 unsigned int npoints_B = 60;
 unsigned int npoints_phi = 60;
+unsigned int nintegration_theta = 60;
+unsigned int nintegration_phi = 60;
+bool use_Dilaton = false;
+bool use_Interpolated_solution = false;
+bool replace_lapse_with_sqrt_chi = false;
+double par_alpha0 = 0.0;
+double par_q_plus = 0.0;
+double par_q_minus = 0.0;
+double par_p_plus = 0.0;
+double par_p_minus = 0.0;
+double target_M_plus = 0.5;
+double target_M_minus = 0.5;
 }  // namespace TPID
 {% endif %}
 
@@ -321,6 +448,14 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
 
     READ_OPTIONAL("solver", "ele_order", {{ project_upper }}_ELE_ORDER);
     READ_OPTIONAL("solver", "mindepth", {{ project_upper }}_MINDEPTH);
+    READ_OPTIONAL("solver", "enable_block_adaptivity",
+                  {{ project_upper }}_ENABLE_BLOCK_ADAPTIVITY);
+    READ_OPTIONAL("solver", "blk_min_x", {{ project_upper }}_BLK_MIN_X);
+    READ_OPTIONAL("solver", "blk_min_y", {{ project_upper }}_BLK_MIN_Y);
+    READ_OPTIONAL("solver", "blk_min_z", {{ project_upper }}_BLK_MIN_Z);
+    READ_OPTIONAL("solver", "blk_max_x", {{ project_upper }}_BLK_MAX_X);
+    READ_OPTIONAL("solver", "blk_max_y", {{ project_upper }}_BLK_MAX_Y);
+    READ_OPTIONAL("solver", "blk_max_z", {{ project_upper }}_BLK_MAX_Z);
     READ_OPTIONAL("solver", "cfl_factor", {{ project_upper }}_CFL_FACTOR);
     READ_OPTIONAL("solver", "init_grid_iter", {{ project_upper }}_INIT_GRID_ITER);
     READ_OPTIONAL("solver", "time_step_output_freq", {{ project_upper }}_TIME_STEP_OUTPUT_FREQ);
@@ -334,9 +469,14 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     READ_REQUIRED_ARRAY("solver", "compd_min", {{ project_upper }}_COMPD_MIN);
     READ_REQUIRED_ARRAY("solver", "compd_max", {{ project_upper }}_COMPD_MAX);
     READ_OPTIONAL_ARRAY("solver", "octree_min", {{ project_upper }}_OCTREE_MIN);
+    // recompute OCTREE_MAX from the toml-loaded MAXDEPTH (static init used the
+    // declared default); READ_OPTIONAL_ARRAY below overrides if user set it
+    {{ project_upper }}_OCTREE_MAX[0] = (double)(1u << {{ project_upper }}_MAXDEPTH);
+    {{ project_upper }}_OCTREE_MAX[1] = (double)(1u << {{ project_upper }}_MAXDEPTH);
+    {{ project_upper }}_OCTREE_MAX[2] = (double)(1u << {{ project_upper }}_MAXDEPTH);
     READ_OPTIONAL_ARRAY("solver", "octree_max", {{ project_upper }}_OCTREE_MAX);
 
-    // Recompute dependent values
+    // recompute dependent values
     {{ project_upper }}_PADDING_WIDTH = {{ project_upper }}_ELE_ORDER >> 1u;
     {{ project_upper }}_CURRENT_MIN_DX = ({{ project_upper }}_COMPD_MAX[0] - {{ project_upper }}_COMPD_MIN[0]) *
                                          (1.0 / (double)(1u << {{ project_upper }}_MAXDEPTH));
@@ -362,15 +502,57 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     // These are read with their short names (no project prefix)
     // =================================================================
 {% for pvar in physics_params | default([]) %}
-    READ_{{ pvar.required }}("physics", "{{ pvar.toml_key }}", {{ pvar.cpp_var }});
+{% if pvar.num_params > 1 %}
+    READ_OPTIONAL_ARRAY("physics", "{{ pvar.toml_key }}", {{ pvar.cpp_var }});
+{% else %}
+    READ_OPTIONAL("physics", "{{ pvar.toml_key }}", {{ pvar.cpp_var }});
+{% endif %}
 {% endfor %}
 
     // =================================================================
     // [initial_data]
     // =================================================================
+    READ_OPTIONAL("initial_data", "id_type", {{ project_upper }}_ID_TYPE);
+
+{% if enable_bh_tracking %}
+    // read BH parameters from [bh1] and [bh2] sections
+    {
+        double mass = 0, bx = 0, by = 0, bz = 0, vx = 0, vy = 0, vz = 0;
+        double spin = 0, spin_theta = 0, spin_phi = 0;
+
+        if (root.contains("bh1")) {
+            const auto& bh = root.at("bh1");
+            if (bh.contains("mass")) mass = toml::find<double>(bh, "mass");
+            if (bh.contains("x")) bx = toml::find<double>(bh, "x");
+            if (bh.contains("y")) by = toml::find<double>(bh, "y");
+            if (bh.contains("z")) bz = toml::find<double>(bh, "z");
+            if (bh.contains("spin")) spin = toml::find<double>(bh, "spin");
+        }
+        BH1 = BH(mass, bx, by, bz, vx, vy, vz, spin, spin_theta, spin_phi);
+        {{ project_upper }}_BH_LOC[0] = Point(bx, by, bz);
+
+        mass = 0; bx = 0; by = 0; bz = 0;
+        if (root.contains("bh2")) {
+            const auto& bh = root.at("bh2");
+            if (bh.contains("mass")) mass = toml::find<double>(bh, "mass");
+            if (bh.contains("x")) bx = toml::find<double>(bh, "x");
+            if (bh.contains("y")) by = toml::find<double>(bh, "y");
+            if (bh.contains("z")) bz = toml::find<double>(bh, "z");
+            if (bh.contains("spin")) spin = toml::find<double>(bh, "spin");
+        }
+        BH2 = BH(mass, bx, by, bz, vx, vy, vz, spin, spin_theta, spin_phi);
+        {{ project_upper }}_BH_LOC[1] = Point(bx, by, bz);
+
+        if (rank == 0) {
+            std::cout << "BH1: mass=" << BH1.getBHMass()
+                      << " loc=(" << BH1.getBHCoordX() << ","
+                      << BH1.getBHCoordY() << "," << BH1.getBHCoordZ() << ")"
+                      << std::endl;
+        }
+    }
+{% endif %}
+
 {% if enable_tpid %}
-    unsigned int id_type = 0;
-    READ_REQUIRED("initial_data", "id_type", id_type);
 
     READ_OPTIONAL("initial_data", "tpid_file_prefix", TPID::FILE_PREFIX);
     READ_OPTIONAL("initial_data", "par_b", TPID::par_b);
@@ -389,9 +571,12 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     // [wave_extraction]
     // =================================================================
 {% if enable_gw_extraction %}
+    READ_OPTIONAL("wave_extraction", "extract_freq", {{ project_upper }}_GW_EXTRACT_FREQ);
+{% if enable_gw_extraction %}
     READ_OPTIONAL("wave_extraction", "num_radaii", GW::{{ project_upper }}_GW_NUM_RADAII);
-    READ_OPTIONAL("wave_extraction", "extraction_radius", GW::{{ project_upper }}_GW_EXTRACTION_RADIUS);
     READ_OPTIONAL("wave_extraction", "num_lmodes", GW::{{ project_upper }}_GW_NUM_LMODES);
+    // TODO: read radii and l_modes arrays from TOML
+{% endif %}
 {% endif %}
 
     // =================================================================
@@ -401,6 +586,145 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     READ_OPTIONAL("logging", "log_file_level", DENDRO_LOG_FILE_LEVEL);
     READ_OPTIONAL("logging", "log_console_level", DENDRO_LOG_CONSOLE_LEVEL);
     READ_OPTIONAL("logging", "force_file_flush", DENDRO_LOG_FORCE_FILE_FLUSH);
+
+{% if enable_ah %}
+#ifdef SOLVER_ENABLE_AH
+    // =================================================================
+    // [apparent_horizon]
+    // =================================================================
+    READ_OPTIONAL("apparent_horizon", "solver_freq", AH::AH_SOLVER_FREQ);
+
+    // read bhahaha config from [apparent_horizon] section
+    if (root.contains("apparent_horizon")) {
+        const auto& ah_sec = root.at("apparent_horizon");
+
+        // scalar params
+        if (ah_sec.contains("n_horizons")) AH::N_HORIZONS = toml::find<unsigned int>(ah_sec, "n_horizons");
+        if (ah_sec.contains("n_resolutions_multigrid")) AH::N_RESOLUTIONS_MULTIGRID = toml::find<unsigned int>(ah_sec, "n_resolutions_multigrid");
+        if (ah_sec.contains("ntheta_max")) AH::NTHETA_MAX = toml::find<int>(ah_sec, "ntheta_max");
+        if (ah_sec.contains("nphi_max")) AH::NPHI_MAX = toml::find<int>(ah_sec, "nphi_max");
+        if (ah_sec.contains("save_dir")) AH::AH_SAVE_DIR = toml::find<std::string>(ah_sec, "save_dir");
+        if (ah_sec.contains("num_resolutions_after_find")) AH::NUM_RESOLUTIONS_AFTER_FIND = toml::find<int>(ah_sec, "num_resolutions_after_find");
+        if (ah_sec.contains("enable_eta_varying_alg")) AH::ENABLE_ETA_VARYING_ALG = toml::find<int>(ah_sec, "enable_eta_varying_alg");
+        if (ah_sec.contains("verbosity_level")) AH::VERBOSITY_LEVEL = toml::find<int>(ah_sec, "verbosity_level");
+
+        // vector params (per-horizon)
+        if (ah_sec.contains("max_iterations")) AH::MAX_ITERATIONS = toml::find<std::vector<int>>(ah_sec, "max_iterations");
+        if (ah_sec.contains("m_scale")) AH::M_SCALE = toml::find<std::vector<double>>(ah_sec, "m_scale");
+        if (ah_sec.contains("cfl_factor")) AH::CFL_FACTOR = toml::find<std::vector<double>>(ah_sec, "cfl_factor");
+        if (ah_sec.contains("theta_l2_m_tol")) AH::THETA_L2_M_TOL = toml::find<std::vector<double>>(ah_sec, "theta_l2_m_tol");
+        if (ah_sec.contains("theta_linf_m_tol")) AH::THETA_LINF_M_TOL = toml::find<std::vector<double>>(ah_sec, "theta_linf_m_tol");
+        if (ah_sec.contains("eta_damp_m")) AH::ETA_DAMP_M = toml::find<std::vector<double>>(ah_sec, "eta_damp_m");
+        if (ah_sec.contains("ko_strength")) AH::KO_STRENGTH = toml::find<std::vector<double>>(ah_sec, "ko_strength");
+        if (ah_sec.contains("max_search_radius")) AH::MAX_SEARCH_RADIUS = toml::find<std::vector<double>>(ah_sec, "max_search_radius");
+        if (ah_sec.contains("nr_interp_max")) AH::NR_INTERP_MAX = toml::find<std::vector<int>>(ah_sec, "nr_interp_max");
+        if (ah_sec.contains("initial_x_center")) AH::INITIAL_X_CENTER = toml::find<std::vector<double>>(ah_sec, "initial_x_center");
+        if (ah_sec.contains("initial_y_center")) AH::INITIAL_Y_CENTER = toml::find<std::vector<double>>(ah_sec, "initial_y_center");
+        if (ah_sec.contains("initial_z_center")) AH::INITIAL_Z_CENTER = toml::find<std::vector<double>>(ah_sec, "initial_z_center");
+        if (ah_sec.contains("ntheta_array")) AH::NTHETA_ARRAY = toml::find<std::vector<int>>(ah_sec, "ntheta_array");
+        if (ah_sec.contains("nphi_array")) AH::NPHI_ARRAY = toml::find<std::vector<int>>(ah_sec, "nphi_array");
+    }
+
+    if (AH::AH_SOLVER_FREQ > 0) {
+{% if enable_bh_tracking %}
+        // build simple BH data from BH1/BH2 for the finder
+        std::vector<dendro_aeh::SimpleBlackHoleData> simpleBHData = {
+            dendro_aeh::SimpleBlackHoleData(
+                BH1.getBHCoordX(), BH1.getBHCoordY(), BH1.getBHCoordZ(),
+                BH1.getBHMass()),
+            dendro_aeh::SimpleBlackHoleData(
+                BH2.getBHCoordX(), BH2.getBHCoordY(), BH2.getBHCoordZ(),
+                BH2.getBHMass()),
+        };
+        bool is_bbh = true;
+{% else %}
+        std::vector<dendro_aeh::SimpleBlackHoleData> simpleBHData;
+        bool is_bbh = false;
+{% endif %}
+
+        // bssn-to-adm transform: converts chi, trK, At, gt -> physical gd, Kd
+        // this is the same for any BSSN-based conformal decomposition
+        auto transform = [](const std::vector<double>& inputs) {
+            std::vector<double> output(12, 0.0);
+
+            // input order matches AH_INDICES: chi, trK, At[6], gt[6]
+            const double chi     = inputs[0];
+            const double trK_val = inputs[1];
+            const double inv_chi = 1.0 / chi;
+            const double trK_third = (1.0 / 3.0) * trK_val;
+
+            // gd[ij] = gt[ij] / chi
+            for (int i = 0; i < 6; i++)
+                output[i] = inputs[8 + i] * inv_chi;
+
+            // Kd[ij] = At[ij] / chi + (1/3) * gd[ij] * trK
+            for (int i = 0; i < 6; i++)
+                output[6 + i] = inputs[2 + i] * inv_chi + output[i] * trK_third;
+
+            return output;
+        };
+
+        Point grid_limits[2];
+        grid_limits[0] = Point({{ project_upper }}_OCTREE_MIN[0],
+                               {{ project_upper }}_OCTREE_MIN[1],
+                               {{ project_upper }}_OCTREE_MIN[2]);
+        grid_limits[1] = Point({{ project_upper }}_OCTREE_MAX[0],
+                               {{ project_upper }}_OCTREE_MAX[1],
+                               {{ project_upper }}_OCTREE_MAX[2]);
+
+        Point domain_limits[2];
+        domain_limits[0] = Point({{ project_upper }}_COMPD_MIN[0],
+                                 {{ project_upper }}_COMPD_MIN[1],
+                                 {{ project_upper }}_COMPD_MIN[2]);
+        domain_limits[1] = Point({{ project_upper }}_COMPD_MAX[0],
+                                 {{ project_upper }}_COMPD_MAX[1],
+                                 {{ project_upper }}_COMPD_MAX[2]);
+
+        AH::ah_finder = std::make_unique<dendro_aeh::AEH_BHaHAHA>(
+            AH::N_HORIZONS, is_bbh,
+            AH::INITIAL_X_CENTER, AH::INITIAL_Y_CENTER, AH::INITIAL_Z_CENTER,
+            AH::N_RESOLUTIONS_MULTIGRID, AH::M_SCALE, AH::CFL_FACTOR,
+            AH::MAX_ITERATIONS, AH::THETA_L2_M_TOL, AH::THETA_LINF_M_TOL,
+            AH::ETA_DAMP_M, AH::KO_STRENGTH, AH::MAX_SEARCH_RADIUS,
+            AH::NR_INTERP_MAX, AH::NTHETA_MAX, AH::NPHI_MAX, AH::AH_SAVE_DIR,
+            simpleBHData, AH::AH_INDICES, transform, grid_limits, domain_limits,
+            {{ project_upper }}_IO_OUTPUT_FREQ, AH::NUM_RESOLUTIONS_AFTER_FIND,
+            AH::NTHETA_ARRAY, AH::NPHI_ARRAY, AH::ENABLE_ETA_VARYING_ALG,
+            AH::VERBOSITY_LEVEL);
+
+        if (rank == 0) {
+            std::cout << "Apparent horizon finder initialized ("
+                      << AH::N_HORIZONS << " horizons, freq="
+                      << AH::AH_SOLVER_FREQ << ")" << std::endl;
+        }
+    }
+#endif
+{% endif %}
+
+{% if use_dendro_derivs %}
+    // [derivatives] -- see dendrolib's derivs_factory.h for valid type names
+    READ_OPTIONAL("derivatives", "type_first", {{ project_upper }}_DERIVTYPE_FIRST);
+    READ_OPTIONAL("derivatives", "type_second", {{ project_upper }}_DERIVTYPE_SECOND);
+    READ_OPTIONAL("derivatives", "matid_first", {{ project_upper }}_DERIV_FIRST_MATID);
+    READ_OPTIONAL("derivatives", "matid_second", {{ project_upper }}_DERIV_SECOND_MATID);
+    READ_OPTIONAL("derivatives", "filter_first", {{ project_upper }}_INMATFILT_FIRST);
+    READ_OPTIONAL("derivatives", "filter_second", {{ project_upper }}_INMATFILT_SECOND);
+    READ_OPTIONAL("derivatives", "post_rhs_filter", {{ project_upper }}_POST_RHS_FILTER);
+
+    {{ project_upper }}_DERIVS = std::make_unique<dendroderivs::DendroDerivatives>(
+        {{ project_upper }}_DERIVTYPE_FIRST, {{ project_upper }}_DERIVTYPE_SECOND,
+        {{ project_upper }}_ELE_ORDER,
+        {{ project_upper }}_DERIV_FIRST_COEFFS, {{ project_upper }}_DERIV_SECOND_COEFFS,
+        {{ project_upper }}_DERIV_FIRST_MATID, {{ project_upper }}_DERIV_SECOND_MATID,
+        {{ project_upper }}_INMATFILT_FIRST, {{ project_upper }}_INMATFILT_SECOND,
+        {{ project_upper }}_INMATFILT_FIRST_COEFFS, {{ project_upper }}_INMATFILT_SECOND_COEFFS,
+        {{ project_upper }}_POST_RHS_FILTER);
+
+    if (rank == 0) {
+        std::cout << "DendroDerivatives initialized: "
+                  << {{ project_upper }}_DERIVS->toString() << std::endl;
+    }
+{% endif %}
 
     #undef READ_REQUIRED
     #undef READ_OPTIONAL

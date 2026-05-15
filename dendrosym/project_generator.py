@@ -36,24 +36,42 @@ def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
-def _rewrite_deriv_calls(code: str, deriv_obj: str) -> str:
+def _rewrite_deriv_calls(code: str, deriv_obj: str,
+                         *, use_advective: bool = False) -> str:
     """Rewrite legacy derivative calls to use a DendroDerivatives object.
 
-    Transforms:
-        deriv_x(out, in, hx, sz, bflag)   ->  DERIVS->grad_x(out, in, hx, sz, bflag)
-        deriv_xx(out, in, hx, sz, bflag)   ->  DERIVS->grad_xx(out, in, hx, sz, bflag)
-        deriv_yy(...)                       ->  DERIVS->grad_yy(...)
-
-    Leaves advective derivatives (adv_deriv_x) unchanged.
+    Non-advective: deriv_{x,xx,xy,...}(...) -> DERIVS.grad_{x,xx,xy,...}(...).
+    Advective: adv_deriv_{x,y,z}(...,betax,bflag) -> DERIVS.grad_x(...,bflag)
+    when use_advective=False (drops upwinding; dendrolib Derivs has no
+    advective method yet). use_advective=True leaves the calls in place.
     """
     import re
-    # Match deriv_x, deriv_y, deriv_z, deriv_xx, deriv_yy, deriv_zz, deriv_xy, etc.
-    # but NOT adv_deriv_x or ko_deriv_x
+    # plain centered FD: deriv_x / deriv_xx / deriv_xy / ...
     pattern = r'(?<![a-zA-Z_])deriv_(x{1,2}|y{1,2}|z{1,2}|xy|xz|yz)\('
-    def replacer(m):
-        suffix = m.group(1)
-        return f'{deriv_obj}->grad_{suffix}('
-    return re.sub(pattern, replacer, code)
+    code = re.sub(pattern, lambda m: f'{deriv_obj}.grad_{m.group(1)}(', code)
+
+    # advective FD: adv_deriv_x / adv_deriv_y / adv_deriv_z
+    if not use_advective:
+        # collapse onto non-advective by dropping the 5th arg (betax):
+        # adv_deriv_x(out,in,hx,sz,betax,bflag) -> DERIVS.grad_x(out,in,hx,sz,bflag)
+        adv_call_pattern = re.compile(
+            r'(?<![a-zA-Z_])adv_deriv_([xyz])\('
+            r'\s*([^,]+?)\s*,'   # out
+            r'\s*([^,]+?)\s*,'   # in
+            r'\s*([^,]+?)\s*,'   # hx
+            r'\s*([^,]+?)\s*,'   # sz
+            r'\s*[^,]+?\s*,'     # betax (discarded)
+            r'\s*([^)]+?)\s*\)'  # bflag
+        )
+        code = adv_call_pattern.sub(
+            lambda m: (
+                f'{deriv_obj}.grad_{m.group(1)}'
+                f'({m.group(2)}, {m.group(3)}, {m.group(4)}, '
+                f'{m.group(5)}, {m.group(6)})'
+            ),
+            code,
+        )
+    return code
 
 
 # ---------------------------------------------------------------------------
@@ -106,9 +124,21 @@ class DendroProjectGenerator:
         # 2. Generate the expensive CSE-optimised .cpp.inc files
         if not skip_gencode:
             print("Generating equation code (gencode/)...", file=sys.stderr)
-            self._generate_gencode(output / "gencode", ctx)
+            self._generate_gencode(output / "solver" / "gencode", ctx)
         else:
             print("Skipping gencode (skip_gencode=True)", file=sys.stderr)
+            # still set the expected gencode filenames so templates can include them
+            prefix = self.config.project_name
+            for vt in ctx["var_types"]:
+                ctx[f"{vt}_gencode"] = {
+                    "deriv_alloc": f"{prefix}_{vt}_deriv_memalloc.cpp.inc",
+                    "deriv_calc": f"{prefix}_{vt}_deriv_calc.cpp.inc",
+                    "deriv_dealloc": f"{prefix}_{vt}_deriv_memdealloc.cpp.inc",
+                    "intermediate_grad": f"{prefix}_{vt}_intermediate_grad.cpp.inc",
+                    "intermediate_grad_dealloc": f"{prefix}_{vt}_intermediate_grad_dealloc.cpp.inc",
+                    "rhs_eqns": f"{prefix}_{vt}_rhs_eqns.cpp.inc",
+                    "ko_deriv_calc": f"{prefix}_{vt}_ko_deriv_calc.cpp.inc",
+                }
 
         if not gencode_only:
             # 3. Render templates -> src/ and include/
@@ -160,12 +190,21 @@ class DendroProjectGenerator:
 
             # variable extraction code
             ctx[f"{vt}_var_extraction"] = c.generate_variable_extraction(vt)
-            ctx[f"{vt}_rhs_var_extraction"] = c.generate_rhs_var_extraction(vt)
+            ctx[f"{vt}_rhs_var_extraction"] = c.generate_rhs_var_extraction(
+                vt, zip_var_name="unzipVarsRHS"
+            )
 
             # For constraint output in physcon, use a different zip var name
             if vt == "constraint":
-                ctx[f"{vt}_output_extraction"] = c.generate_rhs_var_extraction(
-                    vt, zip_var_name="unzipConsVars"
+                # need to use the right enum name for constraints
+                named_enums_c = c.get_enum_var_names(vt)
+                rhs_names_c = c.get_rhs_var_names(vt)
+                ctx[f"{vt}_output_extraction"] = dendrosym.codegen.gen_var_info(
+                    rhs_names_c,
+                    zip_var_name="unzipConsVars",
+                    use_const=False,
+                    enum_name="VAR_CONSTRAINT",
+                    enum_var_names=named_enums_c,
                 )
 
         # -- parameter extraction code (per param-subtype like evolution, constraint)
@@ -195,16 +234,41 @@ class DendroProjectGenerator:
                     else:
                         toml_default = str(default_val)
 
+                # map dtypes to C++ types
+                cpp_dtype = pvar.dtype
+                if "unsigned int" in cpp_dtype:
+                    cpp_dtype_base = "unsigned int"
+                elif "int" in cpp_dtype:
+                    cpp_dtype_base = "int"
+                elif "double" in cpp_dtype:
+                    cpp_dtype_base = "double"
+                elif "float" in cpp_dtype:
+                    cpp_dtype_base = "float"
+                else:
+                    cpp_dtype_base = "double"
+
+                # build extern declaration and definition
+                if pvar.num_params > 1:
+                    extern_decl = f"extern {cpp_dtype_base} {cpp_var}[{pvar.num_params}];"
+                    default_str = "{" + ", ".join(str(d) for d in pvar.default) + "}"
+                    definition = f"{cpp_dtype_base} {cpp_var}[{pvar.num_params}] = {default_str};"
+                else:
+                    extern_decl = f"extern {cpp_dtype_base} {cpp_var};"
+                    definition = f"{cpp_dtype_base} {cpp_var} = {pvar.default};"
+
                 physics_params.append({
                     "var_name": pvar.var_name,
                     "toml_key": toml_key,
                     "cpp_var": cpp_var,
                     "dtype": pvar.dtype,
+                    "cpp_dtype": cpp_dtype_base,
                     "num_params": pvar.num_params,
                     "default": pvar.default,
                     "toml_default": toml_default,
                     "description": pvar.description or f"Parameter: {pvar.var_name}",
-                    "required": "OPTIONAL",  # physics params default optional
+                    "required": "OPTIONAL",
+                    "extern_decl": extern_decl,
+                    "definition": definition,
                 })
         ctx["physics_params"] = physics_params
 
@@ -215,17 +279,139 @@ class DendroProjectGenerator:
         for vt in var_types:
             ctx[f"{vt}_bcs_code"] = ""
             ctx[f"{vt}_ko_code"] = ""
-        ctx["evolution_constraint_enforcement"] = ""
+
+        # evolution-constraint enforcement is just string-gen (no CSE), so
+        # populate it here -- means --skip-gencode regens still emit it
+        if hasattr(c, "generate_evolution_constraints"):
+            try:
+                ctx["evolution_constraint_enforcement"] = (
+                    c.generate_evolution_constraints()
+                )
+            except Exception:
+                ctx["evolution_constraint_enforcement"] = ""
+        else:
+            ctx["evolution_constraint_enforcement"] = ""
+
+        # pos_floor vars: feed `<VAR>_FLOOR` constants to parameters.h/cpp so
+        # constraints.h enforcement compiles for any conformal-factor name
+        pos_floor_vars = []
+        ec_info = getattr(c, "evolution_constraint_info", None)
+        if ec_info and "pos_floor" in ec_info:
+            for sym_obj in ec_info["pos_floor"]:
+                vname = str(sym_obj)
+                if vname.endswith(c.idx_str):
+                    vname = vname[: -len(c.idx_str)]
+                pos_floor_vars.append(vname)
+        ctx["pos_floor_vars"] = pos_floor_vars
 
         # -- feature flags (templates use these to conditionally include code)
         ctx["enable_bh_tracking"] = getattr(c, "enable_bh_tracking", False)
         ctx["enable_gw_extraction"] = getattr(c, "enable_gw_extraction", False)
         ctx["enable_tpid"] = getattr(c, "enable_tpid", False)
+        # AH finder: on by default for GR, gated by a compile-time cmake flag
+        ctx["enable_ah"] = getattr(c, "enable_ah", True)
 
-        # -- derivative system: if set, emits DendroDerivatives method calls
-        # e.g. "SOLVER_DERIVS" -> SOLVER_DERIVS->grad_x(...)
+        # derivative system: if set, emit DendroDerivatives method calls
         ctx["deriv_obj"] = getattr(c, "deriv_obj", "")
         ctx["use_dendro_derivs"] = ctx["deriv_obj"] != ""
+
+        # initial data types -- entries carry "code" (raw C) or "sympy_exprs"
+        # ({var: expr}); sympy_exprs are converted to C after param_subs is built
+        ctx["_raw_initial_data_types"] = getattr(c, "initial_data_types", [])
+
+        ctx["enable_analytical"] = getattr(c, "enable_analytical", False)
+
+        # symbolic IC + analytical -> C code via DendroCPrinter
+        import sympy as sym
+        from dendrosym.code_printer import DendroCPrinter
+
+        cprinter = DendroCPrinter()
+
+        # param symbols -> global C++ names, e.g. wave_speed -> WAVE_WAVE_SPEED
+        param_subs = {}
+        for param_subtype, param_list in c.all_vars.get("parameter", {}).items():
+            for pvar in param_list:
+                for s in (pvar.var_symbols if isinstance(pvar.var_symbols, tuple)
+                          else [pvar.var_symbols]):
+                    global_name = f"{c.project_upper}_{pvar.var_name.upper()}"
+                    if pvar.num_params > 1:
+                        # array params like lambda[0] -> PROJECT_LAMBDA[0]
+                        idx_str = str(s)
+                        if "[" in idx_str:
+                            idx = idx_str.split("[")[1].rstrip("]")
+                            param_subs[s] = sym.Symbol(f"{global_name}[{idx}]")
+                        else:
+                            param_subs[s] = sym.Symbol(global_name)
+                    else:
+                        param_subs[s] = sym.Symbol(global_name)
+
+        # tag id types needing sympy->C conversion; we convert below once
+        # param_subs is finalized (runtime_symbol_map gets merged in next)
+        processed_id_types = []
+        for idt in ctx.pop("_raw_initial_data_types", []):
+            idt = dict(idt)
+            if "sympy_exprs" in idt and idt["sympy_exprs"]:
+                idt["_needs_sympy_conversion"] = True
+            processed_id_types.append(idt)
+        ctx["_pending_initial_data_types"] = processed_id_types
+
+        # user-defined runtime symbol mappings -- sympy symbols -> C++ runtime
+        # values (e.g. BH mass, coordinates)
+        runtime_subs = getattr(c, "runtime_symbol_map", {})
+        param_subs.update(runtime_subs)
+
+        # finalize id types: sympy_exprs -> C lines
+        final_id_types = []
+        for idt in ctx.pop("_pending_initial_data_types", []):
+            if idt.pop("_needs_sympy_conversion", False):
+                sympy_exprs = idt.pop("sympy_exprs")
+                lines = []
+                for var_sym, expr in sympy_exprs.items():
+                    var_name = str(var_sym).replace(c.idx_str, "")
+                    expr = sym.sympify(expr)
+                    expr_sub = expr.subs(param_subs)
+                    ccode = cprinter.doprint(expr_sub)
+                    lines.append(
+                        f"    var[VAR::U_{var_name.upper()}] = {ccode};"
+                    )
+                idt["code"] = "\n".join(lines)
+            final_id_types.append(idt)
+        ctx["initial_data_types"] = final_id_types
+
+        # symbolic initial data: dict of {var_symbol: sympy_expr}
+        sym_init_data = getattr(c, "symbolic_initial_data", {})
+        if sym_init_data:
+            init_lines = []
+            for var_sym, expr in sym_init_data.items():
+                var_name = str(var_sym).replace(c.idx_str, "")
+                expr_sub = expr.subs(param_subs)
+                ccode = cprinter.doprint(expr_sub)
+                init_lines.append(
+                    f"var[VAR::U_{var_name.upper()}] = {ccode};"
+                )
+            ctx["symbolic_init_code"] = "\n".join(init_lines)
+            ctx["symbolic_init_name"] = getattr(
+                c, "symbolic_initial_data_name", "symbolicInit"
+            )
+        else:
+            ctx["symbolic_init_code"] = ""
+
+        # symbolic analytical solution: dict of {var_symbol: sympy_expr(x,y,z,t)}
+        sym_analytical = getattr(c, "symbolic_analytical_solution", {})
+        if sym_analytical:
+            ana_lines = []
+            for var_sym, expr in sym_analytical.items():
+                var_name = str(var_sym).replace(c.idx_str, "")
+                expr_sub = expr.subs(param_subs)
+                ccode = cprinter.doprint(expr_sub)
+                ana_lines.append(
+                    f"var[VAR::U_{var_name.upper()}] = {ccode};"
+                )
+            ctx["symbolic_analytical_code"] = "\n".join(ana_lines)
+            # auto-enable when the user provides a symbolic analytical solution
+            ctx["enable_analytical"] = True
+        else:
+            ctx["symbolic_analytical_code"] = ""
 
         return ctx
 
@@ -266,7 +452,10 @@ class DendroProjectGenerator:
             # deriv_x(...) calls to DERIVS->grad_x(...) style
             deriv_obj_name = ctx.get("deriv_obj", "")
             if deriv_obj_name:
-                deriv_calc = _rewrite_deriv_calls(deriv_calc, deriv_obj_name)
+                use_advective = getattr(c, "use_advective_derivs", False)
+                deriv_calc = _rewrite_deriv_calls(
+                    deriv_calc, deriv_obj_name, use_advective=use_advective
+                )
 
             (gencode_dir / alloc_file).write_text(deriv_alloc)
             (gencode_dir / calc_file).write_text(deriv_calc)
@@ -360,20 +549,23 @@ class DendroProjectGenerator:
         # Map of output path -> template path (relative to templates/)
         template_map = {
             # GR solver templates
-            "include/grDef.h": "gr/grDef.h.j2",
-            "include/rhs.h": "gr/rhs.h.j2",
-            "include/physcon.h": "gr/physcon.h.j2",
-            "include/parameters.h": "gr/parameters.h.j2",
-            f"include/{ctx['project_name']}_constraints.h": "gr/constraints.h.j2",
-            f"include/{ctx['project_name']}Ctx.h": "gr/solver_ctx.h.j2",
-            "include/grUtils.h": "gr/grUtils.h.j2",
-            "src/rhs.cpp": "gr/rhs.cpp.j2",
-            "src/physcon.cpp": "gr/physcon.cpp.j2",
-            "src/parameters.cpp": "gr/parameters.cpp.j2",
-            f"src/{ctx['project_name']}Ctx.cpp": "gr/solver_ctx.cpp.j2",
-            "src/grUtils.cpp": "gr/grUtils.cpp.j2",
-            f"{ctx['project_name']}_main.cpp": "gr/main.cpp.j2",
-            # Sample parameter file
+            "solver/include/grDef.h": "gr/grDef.h.j2",
+            **({"solver/include/bh.h": "gr/bh.h.j2"} if ctx.get("enable_bh_tracking") else {}),
+            "solver/include/rhs.h": "gr/rhs.h.j2",
+            "solver/include/physcon.h": "gr/physcon.h.j2",
+            "solver/include/parameters.h": "gr/parameters.h.j2",
+            f"solver/include/{ctx['project_name']}_constraints.h": "gr/constraints.h.j2",
+            f"solver/include/{ctx['project_name']}Ctx.h": "gr/solver_ctx.h.j2",
+            "solver/include/grUtils.h": "gr/grUtils.h.j2",
+            "solver/include/profile_params.h": "gr/profile_params.h.j2",
+            "solver/src/rhs.cpp": "gr/rhs.cpp.j2",
+            "solver/src/profile_params.cpp": "gr/profile_params.cpp.j2",
+            "solver/src/physcon.cpp": "gr/physcon.cpp.j2",
+            "solver/src/parameters.cpp": "gr/parameters.cpp.j2",
+            f"solver/src/{ctx['project_name']}Ctx.cpp": "gr/solver_ctx.cpp.j2",
+            "solver/src/grUtils.cpp": "gr/grUtils.cpp.j2",
+            f"solver/{ctx['project_name']}_main.cpp": "gr/main.cpp.j2",
+            # sample parameter file (at project root for easy access)
             f"{ctx['project_name']}_parameters.sample.toml": "gr/sample_params.toml.j2",
             # Common templates
             "CMakeLists.txt": "common/CMakeLists.txt.j2",

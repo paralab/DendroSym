@@ -41,6 +41,15 @@ class DendroCPrinter(C99CodePrinter):
             },
         )
 
+    def _print_im(self, expr):
+        # all GR quantities are real; sympy emits im() only when it can't prove
+        # this (e.g. psi**p_expo with unconstrained p_expo)
+        return "0.0"
+
+    def _print_re(self, expr):
+        # dual to _print_im
+        return self._print(expr.args[0])
+
     def _print_Pow(self, expr):
         """Special printer for remaining Pow expressions to force multiplication
 
@@ -61,12 +70,14 @@ class DendroCPrinter(C99CodePrinter):
         """
         PREC = precedence(expr)
         if expr.exp in range(2, 7):
-            return "*".join([self.parenthesize(expr.base, PREC)] * int(expr.exp))
+            # wrap in parens so it's safe as a Mul denominator
+            inner = "*".join([self.parenthesize(expr.base, PREC)] * int(expr.exp))
+            return "(" + inner + ")"
         elif expr.exp in range(-6, 0):
             return (
-                "1.0/("
+                "(1.0/("
                 + ("*".join([self.parenthesize(expr.base, PREC)] * int(-expr.exp)))
-                + ")"
+                + "))"
             )
         else:
             return super()._print_Pow(expr)

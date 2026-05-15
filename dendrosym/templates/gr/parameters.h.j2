@@ -27,6 +27,10 @@
 #include "dendro.h"
 #include "memory_pool.h"
 #include "parUtils.h"
+{% if use_dendro_derivs %}
+#include <memory>
+#include "derivatives.h"
+{% endif %}
 
 {% if enable_bh_tracking %}
 #include "bh.h"
@@ -75,6 +79,18 @@ extern unsigned int {{ project_upper }}_DIM;
 extern unsigned int {{ project_upper }}_MAXDEPTH;
 extern unsigned int {{ project_upper }}_MINDEPTH;
 
+// Block-adaptive mesh: if true, the initial octree is a uniform grid at
+// MINDEPTH over the block region [BLK_MIN, BLK_MAX], with AMR disabled.
+// If false, function2Octree is used (wavelet-driven AMR enabled).
+// Matches BSSN_GR's BSSN_ENABLE_BLOCK_ADAPTIVITY convention.
+extern bool {{ project_upper }}_ENABLE_BLOCK_ADAPTIVITY;
+extern double {{ project_upper }}_BLK_MIN_X;
+extern double {{ project_upper }}_BLK_MIN_Y;
+extern double {{ project_upper }}_BLK_MIN_Z;
+extern double {{ project_upper }}_BLK_MAX_X;
+extern double {{ project_upper }}_BLK_MAX_Y;
+extern double {{ project_upper }}_BLK_MAX_Z;
+
 extern unsigned int {{ project_upper }}_RK_TIME_BEGIN;
 extern unsigned int {{ project_upper }}_RK_TIME_END;
 extern unsigned int {{ project_upper }}_RK_TYPE;
@@ -115,6 +131,17 @@ extern double {{ project_upper }}_WAVELET_TOL_FUNCTION_R0;
 extern double {{ project_upper }}_WAVELET_TOL_FUNCTION_R1;
 extern RefinementMode {{ project_upper }}_REFINEMENT_MODE;
 
+// grid bounds (physical domain for domain decomposition)
+extern double {{ project_upper }}_GRID_MIN_X;
+extern double {{ project_upper }}_GRID_MIN_Y;
+extern double {{ project_upper }}_GRID_MIN_Z;
+extern double {{ project_upper }}_GRID_MAX_X;
+extern double {{ project_upper }}_GRID_MAX_Y;
+extern double {{ project_upper }}_GRID_MAX_Z;
+extern unsigned int {{ project_upper }}_SPLIT_FIX;
+extern unsigned int {{ project_upper }}_ASYNC_COMM_K;
+// ENABLE_BLOCK_ADAPTIVITY declared earlier as `bool` (BSSN-style).
+
 // Logging
 extern std::string DENDRO_LOG_FILE;
 extern int DENDRO_LOG_FILE_LEVEL;
@@ -127,13 +154,21 @@ extern bool DENDRO_LOG_FORCE_FILE_FLUSH;
 // These correspond to the ParameterVariable objects defined in the
 // Python equation config file.
 // -----------------------------------------------------------------
-{% for param_name in physics_param_declarations | default([]) %}
-{{ param_name }}
+{% for pvar in physics_params | default([]) %}
+{{ pvar.extern_decl }}
 {% endfor %}
 
 // -----------------------------------------------------------------
 // [dissipation]
 // -----------------------------------------------------------------
+// [initial_data]
+extern unsigned int {{ project_upper }}_ID_TYPE;
+
+// evolution constraint floors
+{% for vname in pos_floor_vars | default(['chi', 'alpha']) %}
+extern double {{ vname | upper }}_FLOOR;
+{% endfor %}
+
 extern double KO_DISS_SIGMA;
 extern bool USE_CONST_KO;
 extern unsigned int DISSIPATION_TYPE;
@@ -157,53 +192,79 @@ extern std::string {{ project_upper }}_INMATFILT_FIRST;
 extern std::string {{ project_upper }}_INMATFILT_SECOND;
 extern std::vector<double> {{ project_upper }}_INMATFILT_FIRST_COEFFS;
 extern std::vector<double> {{ project_upper }}_INMATFILT_SECOND_COEFFS;
+extern std::string {{ project_upper }}_POST_RHS_FILTER;
 {% endif %}
 
 // -----------------------------------------------------------------
 // Derivative count (auto-computed from equations)
 // -----------------------------------------------------------------
-{% if num_derivatives is defined %}
-const unsigned int {{ project_upper }}_NUM_DERIVATIVES = {{ num_derivatives }};
-{% else %}
-// TODO: set this based on generated derivative counts
 extern unsigned int {{ project_upper }}_NUM_DERIVATIVES;
-{% endif %}
 
 }  // namespace {{ namespace }}
 
-// -----------------------------------------------------------------
-// [initial_data]
-// -----------------------------------------------------------------
-namespace TPID {
-extern std::string FILE_PREFIX;
-extern double par_b;
-extern double par_m_plus;
-extern double par_m_minus;
-extern double par_P_plus[3];
-extern double par_P_minus[3];
-extern double par_S_plus[3];
-extern double par_S_minus[3];
-extern double center_offset[3];
-extern unsigned int give_bare_mass;
-extern int initial_lapse;
-extern unsigned int grid_setup_method;
-extern int solve_momentum_constraint;
-extern unsigned int verbose;
-extern double adm_tol;
-extern double Newton_tol;
-extern double initial_lapse_psi_exponent;
-extern unsigned int npoints_A;
-extern unsigned int npoints_B;
-extern unsigned int npoints_phi;
-}  // namespace TPID
+{% if enable_ah %}
+#ifdef SOLVER_ENABLE_AH
+#include "aeh_bhahaha.h"
+
+namespace AH {
+
+extern std::unique_ptr<dendro_aeh::AEH_BHaHAHA> ah_finder;
+extern unsigned int AH_SOLVER_FREQ;
+
+// bhahaha configuration (all have sensible defaults, override via toml)
+extern unsigned int N_HORIZONS;
+extern unsigned int N_RESOLUTIONS_MULTIGRID;
+extern std::vector<int> MAX_ITERATIONS;
+extern std::vector<double> INITIAL_X_CENTER;
+extern std::vector<double> INITIAL_Y_CENTER;
+extern std::vector<double> INITIAL_Z_CENTER;
+extern std::vector<double> M_SCALE;
+extern std::vector<double> CFL_FACTOR;
+extern std::vector<double> THETA_L2_M_TOL;
+extern std::vector<double> THETA_LINF_M_TOL;
+extern std::vector<double> ETA_DAMP_M;
+extern std::vector<double> KO_STRENGTH;
+extern std::vector<double> MAX_SEARCH_RADIUS;
+extern std::vector<int> NR_INTERP_MAX;
+extern int NTHETA_MAX;
+extern int NPHI_MAX;
+extern std::string AH_SAVE_DIR;
+extern int NUM_RESOLUTIONS_AFTER_FIND;
+extern std::vector<int> NTHETA_ARRAY;
+extern std::vector<int> NPHI_ARRAY;
+extern int ENABLE_ETA_VARYING_ALG;
+extern int VERBOSITY_LEVEL;
+
+// indices into evolution variable array for BHaHAHA
+// order: chi, trK, At00..At22(6), gt00..gt22(6) = 14 total
+extern const std::vector<int> AH_INDICES;
+
+}  // namespace AH
+#endif
+{% endif %}
+
+{% if enable_tpid %}
+// TPID parameters are declared in dendrolib GR/include/tpid_params.h
+// and defined in this solver's parameters.cpp
+#include "tpid_params.h"
+{% endif %}
 
 // -----------------------------------------------------------------
 // [wave_extraction]
 // -----------------------------------------------------------------
+{% if enable_gw_extraction %}
 namespace GW {
 extern unsigned int {{ project_upper }}_GW_NUM_RADAII;
-extern double {{ project_upper }}_GW_EXTRACTION_RADIUS;
+extern unsigned int {{ project_upper }}_GW_RADAII[];
 extern unsigned int {{ project_upper }}_GW_NUM_LMODES;
+extern unsigned int {{ project_upper }}_GW_L_MODES[];
+static const unsigned int {{ project_upper }}_GW_OUTPUT_PRECISION = 10;
 }  // namespace GW
+{% endif %}
+
+// gw extraction frequency (in project namespace for main loop access)
+namespace {{ namespace }} {
+extern unsigned int {{ project_upper }}_GW_EXTRACT_FREQ;
+}  // namespace {{ namespace }}
 
 #endif  // PARAMETERS_H
