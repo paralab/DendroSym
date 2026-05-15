@@ -176,7 +176,10 @@ def construct_cse(
     ee_name = "DENDRO_"
     ee_syms = sym.numbered_symbols(prefix=ee_name)
     print("Now generating cse", file=sys.stderr)
-    _v = sym.cse(lexp, symbols=ee_syms, optimizations="basic")
+    # optimizations=None (was "basic"): the basic preprocessor rewrites
+    # neg-powers to division, often inflating tree size and slowing CSE.
+    # order="none" skips canonical-arg ordering.
+    _v = sym.cse(lexp, symbols=ee_syms, optimizations=None, order="none")
     print("Finished generating cse", file=sys.stderr)
 
     return _v, sym.count_ops(lexp)
@@ -195,11 +198,12 @@ def construct_cse_from_list(
             file=sys.stderr,
         )
 
-    # cse_out = sym.cse(expression_list, symbols=temp_var_gen, optimizations="basic", order="none")
+    # optimizations=None (was "basic"): the basic preprocessor rewrites
+    # neg-powers to division, often inflating tree size before CSE runs.
     cse_out = sym.cse(
         expression_list,
         symbols=temp_var_gen,
-        optimizations="basic",
+        optimizations=None,
         order="none",
         ignore=ignore_symbols,
     )
@@ -230,64 +234,41 @@ def generate_cpu_preextracted(
 
     output_str = "// Dendro: C++ Equation Code Generation {{{{ \n"
 
+    # count_ops walks the full expression tree -- only do it when callers
+    # explicitly need the stat (return_stats=True)
+    want_stats = return_stats
     reduced_ops = 0
+
     output_str += "// Dendro: TEMPORARY VARIABLES\n"
     for v1, v2 in cse_list[0]:
         temp_str = f"{'const ' if use_const else ''}{dtype} "
 
-        # replace powers with multiplication if possible
-        v2 = replace_pow(v2)
-
-        # extract the c-generated code for the expression
-        # ccode_text = sym.ccode(v2, assign_to=v1, user_functions=custom_functions)
+        # DendroCPrinter._print_Pow handles integer powers; no replace_pow needed
         ccode_text = cprinter.doprint(v2, assign_to=v1)
-
-        # then we need to pass it through the changing of derivative names
         ccode_text = change_deriv_names(ccode_text)
-
-        # add add the text
         temp_str += ccode_text
 
         output_str += temp_str + "\n"
-        reduced_ops += sym.count_ops(v2)
+        if want_stats:
+            reduced_ops += sym.count_ops(v2)
 
     output_str += "// Dendro: END TEMPORARY VARIABLES\n"
     output_str += "\n// Dendro: MAIN VARIABLES"
     for i, e in enumerate(cse_list[1]):
         temp_str = "\n//--\n"
-
-        # replace powers with multiplication if possible
-        e = replace_pow(e)
-
-        # extract the c-generated code for the expression
         ccode_text = cprinter.doprint(e, assign_to=str(rhs_var_names[i]) + idx)
-        # ccode_text = sym.ccode(
-        #     e, assign_to=str(rhs_var_names[i]) + idx, user_functions=custom_functions
-        # )
-
-        # then we need to pass it through the changing of derivative names
         ccode_text = change_deriv_names(ccode_text)
-
-        # add add the text
         temp_str += ccode_text
 
         output_str += temp_str + "\n"
-        reduced_ops += sym.count_ops(e)
+        if want_stats:
+            reduced_ops += sym.count_ops(e)
 
     output_str += "// Dendro: END MAIN VARIABLES\n\n"
 
     if not return_stats:
-        output_str += "// Dendro: INFORMATION\n"
-        output_str += "// Dendro: number of original operations: %d \n" % (orig_ops)
-        output_str += "// Dendro: number of reduced operations: %d \n" % (reduced_ops)
-        output_str += "// Dendro: preprocessing reduced the "
-        output_str += f"number of operations by {orig_ops - reduced_ops}\n"
-        percent_reduction = (orig_ops - reduced_ops) / orig_ops
-        output_str += f"// Dendro: a {percent_reduction:0.5%}% reduction\n"
         output_str += "// Dendro: }}}} End Code Generation \n"
-
         return output_str
-
     else:
         return output_str, reduced_ops
 
@@ -368,75 +349,30 @@ def generate_cpu(
     return output_string
 
 
+_DERIV1_PAT = regex.compile(r"\b(agrad|grad|kograd)\((\d),\s*(\w+\[pp\])\)")
+_DERIV2_PAT = regex.compile(r"\bgrad2\((\d),\s*(\d),\s*(\w+\[pp\])\)")
+
+
+def _deriv1_repl(m):
+    return f"{m.group(1)}_{m.group(2)}_{m.group(3)}"
+
+
+def _deriv2_repl(m):
+    a, b = int(m.group(1)), int(m.group(2))
+    if a > b:
+        a, b = b, a
+    return f"grad2_{a}_{b}_{m.group(3)}"
+
+
 def change_deriv_names(in_str: str) -> str:
-    """Change derivative names within a string
+    """Rewrite `grad(i, var[pp])` -> `grad_i_var[pp]` and the grad2 variant.
 
-    This code is used to replace all instances of plain
-    derivative names with their advanced counterparts. This is
-    a fallback in case users define their derivatives as 'd' or
-    'd2' or something similar.
-
-    Parameters
-    ----------
-    in_str : str
-        The input string that has the text to be modified
-
-    Returns
-    -------
-    str
-        The output that has the replaced text
+    Single-pass re.sub (was findall + per-match str.replace, O(N^2) on big
+    CSE outputs).
     """
-
-    # TODO: this may need to be changed, since it's replacing things
-    c_str = in_str
-    derivs = ["agrad", "grad", "kograd"]
-    for deriv in derivs:
-        key = deriv + r"\(\d, \w+\[pp\]\)"
-        slist = regex.findall(key, c_str)
-        # print(slist, file=sys.stderr)
-        for s in slist:
-            # print(s)
-            w1 = s.split("(")
-            w2 = w1[1].split(")")[0].split(",")
-            # print(w1[0]+'_'+w2[0].strip()+'_'+w2[1].strip()+';')
-            rep = w1[0]
-            for v in w2:
-                rep = rep + "_" + v.strip()
-            # rep=rep+';'
-            c_str = c_str.replace(s, rep)
-
-    derivs2 = ["grad2"]
-    for deriv in derivs2:
-        key = deriv + r"\(\d, \d, \w+\[pp\]\)"
-        slist = regex.findall(key, c_str)
-        for s in slist:
-            # print(s)
-            # split into "grad2", "0, 1, symbol)"
-            w1 = s.split("(")
-            # split second part into "0", " 1", " symbol"
-            w2 = w1[1].split(")")[0].split(",")
-            # print(w1[0]+'_'+w2[0].strip()+'_'+w2[1].strip()+';')
-            # rep is then "grad2"
-            rep = w1[0]
-
-            # w2[0] is first dimension
-            # w2[1] is second dimension
-            # w2[2] is the symbol
-            idx1 = int(w2[0].strip())
-            idx2 = int(w2[1].strip())
-            if idx1 > idx2:
-                tempidx = idx1
-                idx1 = idx2
-                idx2 = tempidx
-
-            # then stitch it together
-            rep += f"_{idx1}_{idx2}_{w2[2].strip()}"
-
-            # for vidx, v in enumerate(w2):
-            #     rep = rep + "_" + v.strip()
-            # rep=rep+';'
-            c_str = c_str.replace(s, rep)
-    return c_str
+    out = _DERIV1_PAT.sub(_deriv1_repl, in_str)
+    out = _DERIV2_PAT.sub(_deriv2_repl, out)
+    return out
 
 
 def generate_fpcore(ex, vnames, idx):

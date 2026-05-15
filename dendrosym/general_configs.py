@@ -30,6 +30,23 @@ grad2 = sym.Function("grad2")
 agrad = sym.Function("agrad")
 
 
+def _exprs_equal(a, b):
+    """Fast equality check for two sympy expressions.
+
+    Structural (==) first; falls back to expand-then-compare. Both are
+    much cheaper than sym.simplify(a - b) == 0, which used to be the only
+    test here. Doesn't catch all algebraic identities, but in this codebase
+    these compare derivative-target expressions that are already in a
+    canonical form after chain-rule expansion.
+    """
+    if a == b:
+        return True
+    diff = a - b
+    if diff == 0:
+        return True
+    return diff.expand() == 0
+
+
 class ImproperInitalization(Exception):
     pass
 
@@ -42,38 +59,11 @@ def _transform_worker(args):
 
 
 class DendroConfiguration:
-    """Store and use configurations for Dendro projects
+    """Store and use configurations for Dendro projects.
 
-    This class is used to define and store all of the pieces necessary
-    for the Dendro code generation tool. Dendro is an adaptive mesh
-    framework written in C/C++ that can divide a problem across
-    multiple nodes efficiently. The purpose of this class is to generate
-            for ii, expr in enumerate(all_exp):
-                print(
-                    "    "
-                    + str(all_rhs_names[ii])
-                    + f"  - prog. {ii + 1}/{len(all_exp)} : {(ii + 1) / len(all_exp):.2%}",
-                    file=sys.stderr,
-                )
-
-                # call the find and replace complicated derivatives function
-                # this will update and modify the collection of derivatives
-                new_expr = self.find_and_replace_complex_ders(
-                    expr, self.every_var_name, 0, self.idx_str
-                )
-
-                # add these new expressions to our list
-                new_exprs.append(new_expr)
-
-    some of the Dendro-ready C++ code from symbolic Python code to make
-    it easier to go from equations to project.
-
-    More information on how to use this class will be forthcoming.
-
-    This class is the base configuration class. For use with general
-    relativity projects, use the NRConfigs child class within `nr_configs`.
-
-
+    Holds variable/parameter/RHS definitions and generates C++ code from
+    symbolic Python. For numerical-relativity projects use the NRConfig
+    subclass in nr_configs.py.
     """
 
     def __init__(self, project_name: str, project_description: str = ""):
@@ -1543,8 +1533,8 @@ class DendroConfiguration:
                 continue
 
             if (
-                sym.simplify(der_info["orig_exp"] - term_to_differentiate) == 0
-                and der_info["index_order"] == index_order
+                der_info["index_order"] == index_order
+                and _exprs_equal(der_info["orig_exp"], term_to_differentiate)
             ):
                 return True, der_info["temp_var_name"]
 
@@ -1799,13 +1789,9 @@ class DendroConfiguration:
                     if completed_dir1 == dir1:
                         # then we check the operation is grad 1
                         if completed_deriv_info["operation"] == "grad":
-                            # then we check if the
-                            if (
-                                sym.simplify(
-                                    completed_deriv_info["orig_exp"]
-                                    - deriv_info["orig_exp"]
-                                )
-                                == 0
+                            if _exprs_equal(
+                                completed_deriv_info["orig_exp"],
+                                deriv_info["orig_exp"],
                             ):
                                 found_first_dir = True
                                 # get the intermediate value name, and then we're golden
@@ -1850,8 +1836,9 @@ class DendroConfiguration:
 
     @staticmethod
     def find_if_inter_processed(curr_list, incoming_der_info, idx_str):
+        target = incoming_der_info["orig_exp"]
         for curr_test in curr_list:
-            if sym.simplify(curr_test["orig_exp"] - incoming_der_info["orig_exp"]) == 0:
+            if _exprs_equal(curr_test["orig_exp"], target):
                 inter_var_name = str(curr_test["temp_var_name"])
                 inter_var_name = inter_var_name.replace(idx_str, "")
                 return True, inter_var_name + "_intermediate"

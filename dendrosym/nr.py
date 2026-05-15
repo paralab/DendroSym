@@ -876,8 +876,10 @@ def get_inverse_metric():
         raise ValueError("Dendro: Metric not defined.")
 
     if inv_metric == undef:
-        # method : ('GE', 'LU', or 'ADJ')
-        inv_metric = sym.simplify(metric.inv("ADJ"))
+        # ADJ-method inverse is already an exact rational; skip sym.simplify --
+        # CSE downstream handles cancellations and simplify can take minutes
+        # for nontrivial metrics.
+        inv_metric = metric.inv("ADJ")
 
     return inv_metric
 

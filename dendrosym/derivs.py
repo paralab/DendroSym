@@ -201,19 +201,22 @@ def restore_original_derivatives(expr):
     return expr
 
 
+_RESTORE_CACHE = {"key": None, "dict": None}
+
+
 def restore_only_symbols(expr):
-    d_order = (xx, yy, zz)
+    # build the reverse-replacement dict once per (variable_strs, idx_str)
+    # tuple and memoize. previously rebuilt per call (~50-100x in a loop).
+    key = (tuple(variable_strs), idx_str)
+    if _RESTORE_CACHE["key"] != key:
+        symbols_find_norep = [sym.Symbol(xr + idx_str) for xr in variable_strs]
+        symbols_replace_norep = [
+            sym.Function(sym.Symbol(xr))(xx, yy, zz) for xr in variable_strs
+        ]
+        _RESTORE_CACHE["key"] = key
+        _RESTORE_CACHE["dict"] = dict(zip(symbols_replace_norep, symbols_find_norep))
 
-    # now we want it all with no repeats!!!!!
-    symbols_find_norep = [sym.Symbol(xr + idx_str) for xr in variable_strs]
-    symbols_replace_norep = [
-        sym.Function(sym.Symbol(xr))(xx, yy, zz) for xr in variable_strs
-    ]
-    reverse_repl = dict(zip(symbols_replace_norep, symbols_find_norep))
-
-    expr = expr.xreplace(reverse_repl)
-
-    return expr
+    return expr.xreplace(_RESTORE_CACHE["dict"])
 
 
 def set_i_j_k(i_in, j_in, k_in):
