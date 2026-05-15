@@ -288,30 +288,24 @@ class DendroConfiguration:
 
         # start with the staged expressions
         if len(staged_exp) > 0:
-            orig_n_ops = sym.count_ops(staged_exp)
             cse_exp = dendrosym.codegen.construct_cse_from_list(
                 staged_exp, temp_var_prefix="DENDRO_STAGED_VAR_"
             )
 
-            # NO INDEX STRING HERE, WE AREN'T INDEXING INTO THEM
+            # NO INDEX STRING HERE, WE AREN'T INDEXING INTO THEM. orig_ops=0
+            # since generate_cpu_preextracted only uses it for return_stats=True
             output_str = dendrosym.codegen.generate_cpu_preextracted(
-                cse_exp, staged_exprs_names, "", orig_n_ops
+                cse_exp, staged_exprs_names, "", 0
             )
         else:
-            orig_n_ops = 0
             output_str = ""
-
-        # count the number of original operations on the expressions
-        orig_n_ops += sym.count_ops(all_exp)
 
         # construct cse from the list
         cse_exp = dendrosym.codegen.construct_cse_from_list(all_exp)
 
         if arc_type == "cpu":
-            # then we're to send this information to the cpu gen function
-
             main_output_str = dendrosym.codegen.generate_cpu_preextracted(
-                cse_exp, all_rhs_names, self.idx_str, orig_n_ops
+                cse_exp, all_rhs_names, self.idx_str, 0
             )
 
             output_str += main_output_str
@@ -2139,32 +2133,39 @@ class DendroConfiguration:
 
     @staticmethod
     def find_all_unique_ders(rhs_funcs, rhs_names, sort=True):
-        # NOTE: this is assumed to be after the complicated ones are
-        # gathered
-        # this will then help us keep track of all of the different derivatives
-        # we have to calculate
+        # single-pass collection of all derivative-call atoms (previously three
+        # separate atoms() walks over the entire expression tree). atoms()
+        # uses preorder_traversal internally, so combining cuts ~3x the walk.
 
         combined_expr = sym.Tuple(*rhs_funcs)
+        d_cls = dendrosym.nr.d
+        d2s_cls = dendrosym.nr.d2s
+        ad_cls = dendrosym.nr.ad
+        use_agrad = d_cls is not ad_cls
 
-        if dendrosym.nr.d is dendrosym.nr.ad:
-            grad_list = combined_expr.atoms(dendrosym.nr.d)
-            agrad_list = set()
+        if use_agrad:
+            all_atoms = combined_expr.atoms(d_cls, d2s_cls, ad_cls)
         else:
-            grad_list = combined_expr.atoms(dendrosym.nr.d)
-            agrad_list = combined_expr.atoms(dendrosym.nr.ad)
+            all_atoms = combined_expr.atoms(d_cls, d2s_cls)
 
-        # second derivatives and with normalized indices
-        grad2_list_raw = combined_expr.atoms(dendrosym.nr.d2s)
+        grad_list = set()
         grad2_list = set()
-        for deriv in grad2_list_raw:
-            idx1, idx2, symbol = deriv.args
-            if idx1 > idx2:
-                grad2_list.add(dendrosym.nr.d2s(idx2, idx1, symbol))
-            else:
-                grad2_list.add(deriv)
+        agrad_list = set()
+        for a in all_atoms:
+            cls = type(a)
+            if cls is d_cls:
+                grad_list.add(a)
+            elif cls is d2s_cls:
+                # normalize symmetric-second-derivative indices
+                idx1, idx2, symbol = a.args
+                if idx1 > idx2:
+                    grad2_list.add(d2s_cls(idx2, idx1, symbol))
+                else:
+                    grad2_list.add(a)
+            elif use_agrad and cls is ad_cls:
+                agrad_list.add(a)
 
         if sort:
-            # extract the variable name from the list with the lambda function, that helps sort
             grad_list = sorted(list(grad_list), key=lambda x: str(x.args[1]))
             grad2_list = sorted(list(grad2_list), key=lambda x: str(x.args[2]))
             agrad_list = sorted(list(agrad_list), key=lambda x: str(x.args[1]))

@@ -16,8 +16,10 @@ Usage:
 
 import hashlib
 import json
+import os
 import sys
 import shutil
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
@@ -72,6 +74,177 @@ def _rewrite_deriv_calls(code: str, deriv_obj: str,
             code,
         )
     return code
+
+
+# ---------------------------------------------------------------------------
+# Per-var_type worker (runs in a subprocess for parallel gencode)
+# ---------------------------------------------------------------------------
+
+
+# bump when the gencode pipeline changes in a way that invalidates old caches
+# (e.g. changing the printer, CSE settings, or .cpp.inc layout)
+_CACHE_SCHEMA_VERSION = "v1"
+
+
+def _vt_worker_init(inner_workers):
+    """Cap nested process_map worker count to avoid CPU oversubscription."""
+    os.environ["DENDRO_WORKERS"] = str(inner_workers)
+
+
+def _vt_cache_key(config, vt):
+    """Stable hash of all inputs that affect this var_type's gencode output.
+
+    Side effect: populates config.stored_rhs_function[vt] (same work
+    _extract_rhs_expressions would do anyway, so the cost is amortized when
+    we miss the cache).
+    """
+    import sympy as sym
+    all_exp, all_rhs_names, staged_exp, staged_names, _ = (
+        config._extract_rhs_expressions(vt)
+    )
+    parts = [_CACHE_SCHEMA_VERSION]
+    parts.extend(sym.srepr(e) for e in all_exp)
+    parts.extend(sym.srepr(e) for e in staged_exp)
+    parts.append(repr(all_rhs_names))
+    parts.append(repr(staged_names))
+    parts.append(config.idx_str)
+    parts.append(getattr(config, "deriv_obj", "") or "")
+    parts.append(str(getattr(config, "use_advective_derivs", False)))
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
+
+
+_GENCODE_OUTPUT_KEYS = (
+    "deriv_alloc",
+    "deriv_calc",
+    "deriv_dealloc",
+    "intermediate_grad",
+    "intermediate_grad_dealloc",
+    "rhs_eqns",
+)
+
+
+def _try_cache_hit(vt, vt_hash, gencode_dir, prefix):
+    """If the cache holds a matching entry, copy files + return ctx update.
+
+    Returns None on miss.
+    """
+    cache_root = gencode_dir / ".dendro_cache" / vt_hash
+    meta_path = cache_root / "meta.json"
+    if not meta_path.exists():
+        return None
+    meta = json.loads(meta_path.read_text())
+    gencode_filenames = meta.get("gencode", {})
+    for key, fname in gencode_filenames.items():
+        src = cache_root / fname
+        if not src.exists():
+            return None
+        dst = gencode_dir / fname
+        shutil.copyfile(src, dst)
+    return {
+        f"{vt}_gencode": gencode_filenames,
+        f"{vt}_bcs_code": meta.get("bcs_code", ""),
+        f"{vt}_ko_code": meta.get("ko_code", ""),
+    }
+
+
+def _save_cache(vt, vt_hash, gencode_dir, ctx_update):
+    """Snapshot the just-generated files + ctx update into the cache."""
+    cache_root = gencode_dir / ".dendro_cache" / vt_hash
+    cache_root.mkdir(parents=True, exist_ok=True)
+    gencode_filenames = ctx_update[f"{vt}_gencode"]
+    for fname in gencode_filenames.values():
+        src = gencode_dir / fname
+        if src.exists():
+            shutil.copyfile(src, cache_root / fname)
+    meta = {
+        "gencode": gencode_filenames,
+        "bcs_code": ctx_update.get(f"{vt}_bcs_code", ""),
+        "ko_code": ctx_update.get(f"{vt}_ko_code", ""),
+    }
+    (cache_root / "meta.json").write_text(json.dumps(meta))
+
+
+def _run_var_type(args):
+    """Full per-var_type gencode pipeline: find derivs, allocate, emit RHS.
+
+    Runs in a subprocess of `_generate_gencode`. Writes .cpp.inc files to
+    gencode_dir directly. Returns the small ctx-update dict the parent
+    merges back.
+    """
+    config, vt, prefix, gencode_dir_str, deriv_obj_name, use_advective = args
+    gencode_dir = Path(gencode_dir_str)
+
+    print(f"  processing {vt}...", file=sys.stderr)
+    print(f"    finding and expanding derivatives...", file=sys.stderr)
+    config.find_derivatives(vt)
+
+    print(f"    generating derivative code...", file=sys.stderr)
+    deriv_alloc, deriv_calc, deriv_dealloc = (
+        config.generate_deriv_allocation_and_calc(
+            vt, include_byte_declaration=False
+        )
+    )
+
+    alloc_file = f"{prefix}_{vt}_deriv_memalloc.cpp.inc"
+    calc_file = f"{prefix}_{vt}_deriv_calc.cpp.inc"
+    dealloc_file = f"{prefix}_{vt}_deriv_memdealloc.cpp.inc"
+
+    if deriv_obj_name:
+        deriv_calc = _rewrite_deriv_calls(
+            deriv_calc, deriv_obj_name, use_advective=use_advective
+        )
+
+    (gencode_dir / alloc_file).write_text(deriv_alloc)
+    (gencode_dir / calc_file).write_text(deriv_calc)
+    (gencode_dir / dealloc_file).write_text(deriv_dealloc)
+
+    print(f"    generating intermediate derivatives...", file=sys.stderr)
+    try:
+        intermediate_str, dealloc_intermediate_str = (
+            config.generate_pre_necessary_derivatives(
+                vt, dtype="double", include_byte_declaration=False
+            )
+        )
+    except Exception:
+        intermediate_str = ""
+        dealloc_intermediate_str = ""
+
+    intermediate_file = f"{prefix}_{vt}_intermediate_grad.cpp.inc"
+    intermediate_dealloc_file = f"{prefix}_{vt}_intermediate_grad_dealloc.cpp.inc"
+    (gencode_dir / intermediate_file).write_text(intermediate_str)
+    (gencode_dir / intermediate_dealloc_file).write_text(dealloc_intermediate_str)
+
+    print(f"    generating RHS equations...", file=sys.stderr)
+    rhs_code = config.generate_rhs_code(vt)
+    rhs_file = f"{prefix}_{vt}_rhs_eqns.cpp.inc"
+    (gencode_dir / rhs_file).write_text(rhs_code)
+
+    print(f"    generating BCS code...", file=sys.stderr)
+    try:
+        bcs_code = config.generate_bcs_calculations(vt)
+    except Exception:
+        bcs_code = ""
+
+    print(f"    generating KO code...", file=sys.stderr)
+    try:
+        ko_code = config.generate_ko_calculations(vt)
+    except Exception:
+        ko_code = ""
+
+    print(f"  {vt} done.", file=sys.stderr)
+
+    return {
+        f"{vt}_gencode": {
+            "deriv_alloc": alloc_file,
+            "deriv_calc": calc_file,
+            "deriv_dealloc": dealloc_file,
+            "intermediate_grad": intermediate_file,
+            "intermediate_grad_dealloc": intermediate_dealloc_file,
+            "rhs_eqns": rhs_file,
+        },
+        f"{vt}_bcs_code": bcs_code,
+        f"{vt}_ko_code": ko_code,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -420,102 +593,62 @@ class DendroProjectGenerator:
     # ------------------------------------------------------------------
 
     def _generate_gencode(self, gencode_dir: Path, ctx: dict):
-        """Generate .cpp.inc files for each variable type."""
+        """Generate .cpp.inc files for each variable type, in parallel."""
         gencode_dir.mkdir(parents=True, exist_ok=True)
         c = self.config
         prefix = c.project_name
+        deriv_obj_name = ctx.get("deriv_obj", "")
+        use_advective = getattr(c, "use_advective_derivs", False)
 
+        active_vts = []
         for vt in ctx["var_types"]:
             if c.all_rhs_functions.get(vt) is None:
                 print(f"  skipping {vt} (no RHS function set)", file=sys.stderr)
                 continue
+            active_vts.append(vt)
 
-            print(f"  processing {vt}...", file=sys.stderr)
-
-            # -- must find/expand derivatives first (this populates stored_rhs_function)
-            print(f"    finding and expanding derivatives...", file=sys.stderr)
-            c.find_derivatives(vt)
-
-            # -- derivative allocation, calculation, deallocation
-            print(f"    generating derivative code...", file=sys.stderr)
-            deriv_alloc, deriv_calc, deriv_dealloc = (
-                c.generate_deriv_allocation_and_calc(
-                    vt, include_byte_declaration=False
-                )
+        # cache lookup: if the symbolic RHS hasn't changed, copy prior output
+        # back into gencode_dir and skip the whole pipeline for that var_type
+        force_recache = os.environ.get("DENDRO_NO_GENCODE_CACHE") == "1"
+        vt_hashes = {}
+        miss_vts = []
+        for vt in active_vts:
+            vt_hash = _vt_cache_key(c, vt)
+            vt_hashes[vt] = vt_hash
+            hit = None if force_recache else _try_cache_hit(
+                vt, vt_hash, gencode_dir, prefix
             )
+            if hit is not None:
+                print(f"  [cache hit] {vt} ({vt_hash})", file=sys.stderr)
+                ctx.update(hit)
+            else:
+                miss_vts.append(vt)
 
-            alloc_file = f"{prefix}_{vt}_deriv_memalloc.cpp.inc"
-            calc_file = f"{prefix}_{vt}_deriv_calc.cpp.inc"
-            dealloc_file = f"{prefix}_{vt}_deriv_memdealloc.cpp.inc"
+        args_list = [
+            (c, vt, prefix, str(gencode_dir), deriv_obj_name, use_advective)
+            for vt in miss_vts
+        ]
 
-            # If using DendroDerivatives object, rewrite the legacy
-            # deriv_x(...) calls to DERIVS->grad_x(...) style
-            deriv_obj_name = ctx.get("deriv_obj", "")
-            if deriv_obj_name:
-                use_advective = getattr(c, "use_advective_derivs", False)
-                deriv_calc = _rewrite_deriv_calls(
-                    deriv_calc, deriv_obj_name, use_advective=use_advective
-                )
+        # parallel: each cache-miss var_type runs in its own subprocess.
+        # nested process_map workers are capped via DENDRO_WORKERS.
+        force_seq = os.environ.get("DENDRO_NO_PARALLEL_VT") == "1"
+        results = []
+        if len(args_list) > 1 and not force_seq:
+            inner_workers = max(1, (os.cpu_count() or 2) // len(args_list))
+            with ProcessPoolExecutor(
+                max_workers=len(args_list),
+                initializer=_vt_worker_init,
+                initargs=(inner_workers,),
+            ) as ex:
+                for result in ex.map(_run_var_type, args_list):
+                    results.append(result)
+        else:
+            for args in args_list:
+                results.append(_run_var_type(args))
 
-            (gencode_dir / alloc_file).write_text(deriv_alloc)
-            (gencode_dir / calc_file).write_text(deriv_calc)
-            (gencode_dir / dealloc_file).write_text(deriv_dealloc)
-
-            # -- intermediate / advanced derivatives
-            print(f"    generating intermediate derivatives...", file=sys.stderr)
-            try:
-                intermediate_str, dealloc_intermediate_str = (
-                    c.generate_pre_necessary_derivatives(
-                        vt, dtype="double", include_byte_declaration=False
-                    )
-                )
-            except Exception:
-                intermediate_str = ""
-                dealloc_intermediate_str = ""
-
-            intermediate_file = f"{prefix}_{vt}_intermediate_grad.cpp.inc"
-            intermediate_dealloc_file = (
-                f"{prefix}_{vt}_intermediate_grad_dealloc.cpp.inc"
-            )
-            (gencode_dir / intermediate_file).write_text(intermediate_str)
-            (gencode_dir / intermediate_dealloc_file).write_text(
-                dealloc_intermediate_str
-            )
-
-            # -- RHS equations (the big one)
-            print(f"    generating RHS equations...", file=sys.stderr)
-            rhs_code = c.generate_rhs_code(vt)
-            rhs_file = f"{prefix}_{vt}_rhs_eqns.cpp.inc"
-            (gencode_dir / rhs_file).write_text(rhs_code)
-
-            # KO dissipation: dendrolib's DendroDerivatives handles KO at the
-            # derivative-object level (ExplicitKODissO4 etc.), and the symbolic
-            # KO inline-add is emitted by generate_ko_calculations into
-            # {vt}_ko_code below. no separate per-variable allocation file.
-            ctx[f"{vt}_gencode"] = {
-                "deriv_alloc": alloc_file,
-                "deriv_calc": calc_file,
-                "deriv_dealloc": dealloc_file,
-                "intermediate_grad": intermediate_file,
-                "intermediate_grad_dealloc": intermediate_dealloc_file,
-                "rhs_eqns": rhs_file,
-            }
-
-            # -- BCS code (deferred from _build_context to avoid premature CSE)
-            print(f"    generating BCS code...", file=sys.stderr)
-            try:
-                ctx[f"{vt}_bcs_code"] = c.generate_bcs_calculations(vt)
-            except Exception:
-                ctx[f"{vt}_bcs_code"] = ""
-
-            # -- KO dissipation code
-            print(f"    generating KO code...", file=sys.stderr)
-            try:
-                ctx[f"{vt}_ko_code"] = c.generate_ko_calculations(vt)
-            except Exception:
-                ctx[f"{vt}_ko_code"] = ""
-
-            print(f"  {vt} done.", file=sys.stderr)
+        for vt, result in zip(miss_vts, results):
+            ctx.update(result)
+            _save_cache(vt, vt_hashes[vt], gencode_dir, result)
 
         # -- evolution constraints (deferred from _build_context)
         if hasattr(c, "generate_evolution_constraints"):

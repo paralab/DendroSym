@@ -239,32 +239,26 @@ def generate_cpu_preextracted(
     want_stats = return_stats
     reduced_ops = 0
 
+    # printer + change_deriv_names are now both batched: emit all lines into
+    # output_str first, then run the regex pass once over the whole block
+    # (the regex matches grad(...)/grad2(...) call sites independent of
+    # surrounding context, so per-expression vs one-shot is equivalent).
     output_str += "// Dendro: TEMPORARY VARIABLES\n"
+    prefix = f"{'const ' if use_const else ''}{dtype} "
     for v1, v2 in cse_list[0]:
-        temp_str = f"{'const ' if use_const else ''}{dtype} "
-
-        # DendroCPrinter._print_Pow handles integer powers; no replace_pow needed
-        ccode_text = cprinter.doprint(v2, assign_to=v1)
-        ccode_text = change_deriv_names(ccode_text)
-        temp_str += ccode_text
-
-        output_str += temp_str + "\n"
+        output_str += prefix + cprinter.doprint(v2, assign_to=v1) + "\n"
         if want_stats:
             reduced_ops += sym.count_ops(v2)
 
     output_str += "// Dendro: END TEMPORARY VARIABLES\n"
     output_str += "\n// Dendro: MAIN VARIABLES"
     for i, e in enumerate(cse_list[1]):
-        temp_str = "\n//--\n"
-        ccode_text = cprinter.doprint(e, assign_to=str(rhs_var_names[i]) + idx)
-        ccode_text = change_deriv_names(ccode_text)
-        temp_str += ccode_text
-
-        output_str += temp_str + "\n"
+        output_str += "\n//--\n" + cprinter.doprint(e, assign_to=str(rhs_var_names[i]) + idx) + "\n"
         if want_stats:
             reduced_ops += sym.count_ops(e)
 
     output_str += "// Dendro: END MAIN VARIABLES\n\n"
+    output_str = change_deriv_names(output_str)
 
     if not return_stats:
         output_str += "// Dendro: }}}} End Code Generation \n"
