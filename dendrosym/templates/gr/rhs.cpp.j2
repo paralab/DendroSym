@@ -186,12 +186,6 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
 {% if use_dendro_derivs %}
     // using the DendroDerivatives filter api -- handles ko internally
     if (!{{ deriv_obj }}.do_filter_before()) {
-        {{ namespace }}::timer::t_deriv.start();
-{% if evolution_gencode is defined and evolution_gencode.ko_deriv_calc is defined %}
-#include "../gencode/{{ evolution_gencode.ko_deriv_calc }}"
-{% endif %}
-        {{ namespace }}::timer::t_deriv.stop();
-
         {{ namespace }}::timer::t_rhs.start();
         const double sigma = KO_DISS_SIGMA;
 
@@ -203,13 +197,7 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
         {{ namespace }}::timer::t_rhs.stop();
     }
 {% else %}
-    // legacy ko: compute ko stencils, then add sigma * result to rhs
-    {{ namespace }}::timer::t_deriv.start();
-{% if evolution_gencode is defined and evolution_gencode.ko_deriv_calc is defined %}
-#include "../gencode/{{ evolution_gencode.ko_deriv_calc }}"
-{% endif %}
-    {{ namespace }}::timer::t_deriv.stop();
-
+    // legacy ko: just add sigma * stencil to rhs inline
     {{ namespace }}::timer::t_rhs.start();
     double sigma = KO_DISS_SIGMA;
 

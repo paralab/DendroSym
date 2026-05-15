@@ -488,21 +488,10 @@ class DendroProjectGenerator:
             rhs_file = f"{prefix}_{vt}_rhs_eqns.cpp.inc"
             (gencode_dir / rhs_file).write_text(rhs_code)
 
-            # -- KO derivative calculations
-            print(f"    generating KO derivative code...", file=sys.stderr)
-            try:
-                ko_deriv_alloc, ko_deriv_calc, ko_deriv_dealloc = (
-                    c.generate_ko_deriv_allocation_and_calc(vt)
-                )
-            except Exception:
-                ko_deriv_alloc = ""
-                ko_deriv_calc = ""
-                ko_deriv_dealloc = ""
-
-            ko_calc_file = f"{prefix}_{vt}_ko_deriv_calc.cpp.inc"
-            (gencode_dir / ko_calc_file).write_text(ko_deriv_calc)
-
-            # store filenames in context for template use
+            # KO dissipation: dendrolib's DendroDerivatives handles KO at the
+            # derivative-object level (ExplicitKODissO4 etc.), and the symbolic
+            # KO inline-add is emitted by generate_ko_calculations into
+            # {vt}_ko_code below. no separate per-variable allocation file.
             ctx[f"{vt}_gencode"] = {
                 "deriv_alloc": alloc_file,
                 "deriv_calc": calc_file,
@@ -510,7 +499,6 @@ class DendroProjectGenerator:
                 "intermediate_grad": intermediate_file,
                 "intermediate_grad_dealloc": intermediate_dealloc_file,
                 "rhs_eqns": rhs_file,
-                "ko_deriv_calc": ko_calc_file,
             }
 
             # -- BCS code (deferred from _build_context to avoid premature CSE)

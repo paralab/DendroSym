@@ -80,6 +80,23 @@ class NRConfig(dendrosym.DendroConfiguration):
     def add_parameter_variables(self, in_vars: list, eqn_type: str = "evolution"):
         return super().add_parameter_variables(in_vars, eqn_type)
 
+    def add_initial_data_params(self, in_vars: list):
+        """Register params used only by initial data, not by the RHS.
+
+        Kept in a separate "initial_data" group so a reader can tell at a
+        glance which params actually feed the equations vs. which only affect
+        ICs. Params still get emitted as global C++ macros via the standard
+        parameters.cpp iteration; only rhs.cpp's local-copy block skips them.
+        """
+        # framework validates eqn_type against all_vars.keys() (outer dict),
+        # but stores into all_vars["parameter"][eqn_type] (inner). pre-declare
+        # the slot at both levels. do NOT touch all_var_names outer -- that
+        # would trigger empty-group variable-extraction codegen.
+        self.all_vars.setdefault("initial_data", [])
+        self.all_vars["parameter"].setdefault("initial_data", [])
+        self.all_var_names["parameter"].setdefault("initial_data", [])
+        return super().add_parameter_variables(in_vars, "initial_data")
+
     def set_advective_derivative_var(self, in_var):
         # this should be a 3x1 variable
         if isinstance(in_var, sym.Matrix):
