@@ -56,6 +56,8 @@ BH BH2;
 Point {{ project_upper }}_BH_LOC[2];
 double {{ project_upper }}_BH_MERGE_TIME = std::numeric_limits<double>::max();
 unsigned int {{ project_upper }}_BH_MERGE_STEP = std::numeric_limits<unsigned int>::max();
+unsigned int {{ project_upper }}_BH1_MAX_LEV = 15;
+unsigned int {{ project_upper }}_BH2_MAX_LEV = 15;
 {% endif %}
 
 // Runtime state
@@ -517,6 +519,9 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
 {% if enable_bh_tracking %}
     // read BH parameters from [bh1] and [bh2] sections
     {
+        {{ project_upper }}_BH1_MAX_LEV = {{ project_upper }}_MAXDEPTH;
+        {{ project_upper }}_BH2_MAX_LEV = {{ project_upper }}_MAXDEPTH;
+
         double mass = 0, bx = 0, by = 0, bz = 0, vx = 0, vy = 0, vz = 0;
         double spin = 0, spin_theta = 0, spin_phi = 0;
 
@@ -527,6 +532,9 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
             if (bh.contains("y")) by = toml::find<double>(bh, "y");
             if (bh.contains("z")) bz = toml::find<double>(bh, "z");
             if (bh.contains("spin")) spin = toml::find<double>(bh, "spin");
+            if (bh.contains("max_lev"))
+                {{ project_upper }}_BH1_MAX_LEV =
+                    toml::find<unsigned int>(bh, "max_lev");
         }
         BH1 = BH(mass, bx, by, bz, vx, vy, vz, spin, spin_theta, spin_phi);
         {{ project_upper }}_BH_LOC[0] = Point(bx, by, bz);
@@ -539,6 +547,9 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
             if (bh.contains("y")) by = toml::find<double>(bh, "y");
             if (bh.contains("z")) bz = toml::find<double>(bh, "z");
             if (bh.contains("spin")) spin = toml::find<double>(bh, "spin");
+            if (bh.contains("max_lev"))
+                {{ project_upper }}_BH2_MAX_LEV =
+                    toml::find<unsigned int>(bh, "max_lev");
         }
         BH2 = BH(mass, bx, by, bz, vx, vy, vz, spin, spin_theta, spin_phi);
         {{ project_upper }}_BH_LOC[1] = Point(bx, by, bz);

@@ -19,6 +19,9 @@
 #include "grUtils.h"
 #include "grDef.h"
 #include "parameters.h"
+{% if enable_tpid %}
+#include "TwoPunctures.h"
+{% endif %}
 
 #include <cmath>
 #include <iostream>
@@ -33,6 +36,10 @@ void {{ symbolic_init_name }}(double x, double y, double z, double *var);
 {% for idt in initial_data_types %}
 void {{ idt.function }}(double x, double y, double z, double *var);
 {% endfor %}
+{% if enable_tpid %}
+void twoPuncturesInit(double x, double y, double z, double *var);
+void twoPuncturesInitEstimate(double x, double y, double z, double *var);
+{% endif %}
 
 /**
  * @brief Initial data dispatcher. Called for every grid point during init.
@@ -54,9 +61,15 @@ void initDataFuncToPhysCoords(const double xx1, const double yy1,
     }
 
     switch ({{ project_upper }}_ID_TYPE) {
+{% if enable_tpid %}
+        case 0:
+            twoPuncturesInit(xx, yy, zz, var);
+            break;
+{% else %}
         case 0:
             minkowskiInit(xx, yy, zz, var);
             break;
+{% endif %}
 
 {% if symbolic_init_code %}
         case 2:
@@ -78,6 +91,30 @@ void initDataFuncToPhysCoords(const double xx1, const double yy1,
     }
 }
 
+/**@brief Cheap-estimate IC dispatcher used by function2Octree. Real IC is
+ * applied via {{ project_name }}Ctx::init_grid() after the mesh is built. */
+void initDataFuncToPhysCoordsForMesh(const double xx1, const double yy1,
+                                     const double zz1, double *var) {
+{% if enable_tpid %}
+    const double xx = GRIDX_TO_X(xx1);
+    const double yy = GRIDY_TO_Y(yy1);
+    const double zz = GRIDZ_TO_Z(zz1);
+
+    for (unsigned int i = 0; i < {{ evolution_num_vars }}; i++) var[i] = 0.0;
+
+    switch ({{ project_upper }}_ID_TYPE) {
+        case 0:
+            twoPuncturesInitEstimate(xx, yy, zz, var);
+            break;
+        default:
+            initDataFuncToPhysCoords(xx1, yy1, zz1, var);
+            return;
+    }
+{% else %}
+    initDataFuncToPhysCoords(xx1, yy1, zz1, var);
+{% endif %}
+}
+
 // -------------------------------------------------------------------------
 // flat spacetime (minkowski) -- useful for testing and as a base
 // -------------------------------------------------------------------------
@@ -93,6 +130,48 @@ void minkowskiInit(double x, double y, double z, double *var) {
 {% endif %}
 {% endfor %}
 }
+
+{% if enable_tpid %}
+// -------------------------------------------------------------------------
+// TwoPunctures (id=0) -- reads the spectral solution from <prefix>_tpid_sol.bin
+// produced by the standalone {{ project_name }}_tpid solver.
+// -------------------------------------------------------------------------
+void twoPuncturesInit(double x, double y, double z, double *var) {
+    double mp, mm, mp_adm, mm_adm, E, J1, J2, J3;
+    TwoPunctures(x, y, z, var, &mp, &mm, &mp_adm, &mm_adm, &E, &J1, &J2, &J3);
+}
+
+// -------------------------------------------------------------------------
+// TwoPunctures mesh estimate -- analytic Brill-Lindquist + conformally-flat.
+// Aij omitted (smooth, doesn't drive AMR).
+// -------------------------------------------------------------------------
+void twoPuncturesInitEstimate(double x, double y, double z, double *var) {
+    const double xx = x - TPID::center_offset[0];
+    const double yy = y - TPID::center_offset[1];
+    const double zz = z - TPID::center_offset[2];
+
+    const double dx_p = xx - TPID::par_b;
+    const double dx_m = xx + TPID::par_b;
+    const double eps2 = TPID::TP_epsilon * TPID::TP_epsilon;
+    const double r_plus  = std::sqrt(dx_p * dx_p + yy * yy + zz * zz + eps2);
+    const double r_minus = std::sqrt(dx_m * dx_m + yy * yy + zz * zz + eps2);
+
+    const double psi_BL = 1.0
+                        + 0.5 * TPID::par_m_plus  / r_plus
+                        + 0.5 * TPID::par_m_minus / r_minus;
+
+    var[VAR::U_PSI]      = psi_BL;
+    var[VAR::U_GAMMAT00] = 1.0;
+    var[VAR::U_GAMMAT11] = 1.0;
+    var[VAR::U_GAMMAT22] = 1.0;
+
+    if (TPID::initial_lapse == 2) {
+        var[VAR::U_ALPHA] = std::pow(psi_BL, TPID::initial_lapse_psi_exponent);
+    } else {
+        var[VAR::U_ALPHA] = 1.0;
+    }
+}
+{% endif %}
 
 {% if symbolic_init_code %}
 // -------------------------------------------------------------------------

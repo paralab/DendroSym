@@ -8,6 +8,7 @@
  * Based on the EM4 solver main from dendrolib.
  */
 
+#include <algorithm>
 #include <iostream>
 #include <vector>
 
@@ -69,10 +70,11 @@ int main(int argc, char **argv) {
 
     const unsigned int eOrder = {{ namespace }}::{{ project_upper }}_ELE_ORDER;
 
-    // mesh-refinement IC: takes octree coords, converts internally
+    // mesh-refinement IC: cheap estimate for singular ICs; full IC applied
+    // by ctx->init_grid() below.
     std::function<void(double, double, double, double *)> f_init =
         [](double x, double y, double z, double *var) {
-            {{ namespace }}::initDataFuncToPhysCoords(x, y, z, var);
+            {{ namespace }}::initDataFuncToPhysCoordsForMesh(x, y, z, var);
         };
 
     std::vector<ot::TreeNode> tmpNodes;
@@ -81,7 +83,23 @@ int main(int argc, char **argv) {
     unsigned int varIndex[{{ evolution_num_vars }}];
     for (unsigned int i = 0; i < {{ evolution_num_vars }}; i++) varIndex[i] = i;
 
+    // cap function2Octree depth (mirrors dendrogr_upstream BSSN pattern); the
+    // remaining levels are reached by the init_grid_iter loop below.
+{% if enable_bh_tracking %}
+    const unsigned int bh_max_lev =
+        std::min({{ namespace }}::{{ project_upper }}_BH1_MAX_LEV,
+                 {{ namespace }}::{{ project_upper }}_BH2_MAX_LEV);
+    if (bh_max_lev < MAXDEAPTH_LEVEL_DIFF + 2) {
+        if (rank == 0)
+            std::cerr << "BH max level (" << bh_max_lev
+                      << ") must be at least " << (MAXDEAPTH_LEVEL_DIFF + 2)
+                      << std::endl;
+        MPI_Abort(comm, 0);
+    }
+    unsigned int maxDepthIn = bh_max_lev - MAXDEAPTH_LEVEL_DIFF - 2;
+{% else %}
     unsigned int maxDepthIn = m_uiMaxDepth - 2;
+{% endif %}
 
     if ({{ namespace }}::{{ project_upper }}_ENABLE_BLOCK_ADAPTIVITY) {
         // block-adaptive mode (matches BSSN_GR): uniform grid at MINDEPTH
@@ -171,9 +189,57 @@ int main(int argc, char **argv) {
             new double[{{ namespace }}::{{ project_upper }}_NUM_DERIVATIVES * max_blk_sz];
     }
 
-    // create solver context and time stepper
+    // ctx first; ETS comes after init_grid_iter so its state is sized to
+    // the refined mesh.
     {{ namespace }}::{{ project_upper }}Ctx *ctx =
         new {{ namespace }}::{{ project_upper }}Ctx(mesh);
+
+    // apply real IC once, then refine; intergrid transfer interpolates so
+    // the expensive IC is only evaluated at the initial coarse mesh.
+    ctx->initialize();
+    {
+        const unsigned int max_iter =
+            {{ namespace }}::{{ project_upper }}_INIT_GRID_ITER;
+        if (rank == 0)
+            std::cout << YLW << "Starting init_grid_iter loop (max="
+                      << max_iter << " iters)" << NRM << std::endl;
+        for (unsigned int iter = 1; iter <= max_iter; iter++) {
+            if (!ctx->is_remesh()) {
+                if (rank == 0)
+                    std::cout << "[init_grid_iter " << iter
+                              << "] mesh converged" << std::endl;
+                break;
+            }
+            DendroIntL old_el_l = ctx->get_mesh()->getNumLocalMeshElements();
+            ctx->remesh_and_gridtransfer(
+                {{ namespace }}::{{ project_upper }}_DENDRO_GRAIN_SZ,
+                {{ namespace }}::{{ project_upper }}_LOAD_IMB_TOL,
+                {{ namespace }}::{{ project_upper }}_SPLIT_FIX);
+            DendroIntL new_el_l = ctx->get_mesh()->getNumLocalMeshElements();
+            DendroIntL old_el_g = 0, new_el_g = 0;
+            par::Mpi_Reduce(&old_el_l, &old_el_g, 1, MPI_SUM, 0, comm);
+            par::Mpi_Reduce(&new_el_l, &new_el_g, 1, MPI_SUM, 0, comm);
+            if (rank == 0)
+                std::cout << "[init_grid_iter " << iter
+                          << "] elements " << old_el_g << " -> "
+                          << new_el_g << std::endl;
+            mesh = ctx->get_mesh();
+        }
+    }
+
+    if ({{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE != nullptr) {
+        delete[] {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE;
+        const auto &blkList2 = ctx->get_mesh()->getLocalBlockList();
+        unsigned int max_blk_sz2 = 0;
+        for (unsigned int i = 0; i < blkList2.size(); i++) {
+            unsigned int bsz = blkList2[i].getAllocationSzX() *
+                               blkList2[i].getAllocationSzY() *
+                               blkList2[i].getAllocationSzZ();
+            if (bsz > max_blk_sz2) max_blk_sz2 = bsz;
+        }
+        {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE =
+            new double[{{ namespace }}::{{ project_upper }}_NUM_DERIVATIVES * max_blk_sz2];
+    }
 
     ts::ETS<DendroScalar, {{ namespace }}::{{ project_upper }}Ctx> *ets =
         new ts::ETS<DendroScalar, {{ namespace }}::{{ project_upper }}Ctx>(ctx);

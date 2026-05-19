@@ -20,6 +20,19 @@ namespace {{ namespace }} {
 void initDataFuncToPhysCoords(const double xx, const double yy,
                               const double zz, double *var);
 
+/**@brief Cheap-estimate IC dispatcher used by function2Octree. Real IC is
+ * applied via {{ project_name }}Ctx::init_grid() after the mesh is built.
+ */
+void initDataFuncToPhysCoordsForMesh(const double xx, const double yy,
+                                     const double zz, double *var);
+
+{% if enable_tpid %}
+/**@brief Brill-Lindquist + conformally-flat estimate. Mesh refinement only;
+ * not the TPID solution.
+ */
+void twoPuncturesInitEstimate(double x, double y, double z, double *var);
+{% endif %}
+
 {% if enable_analytical %}
 /**@brief Compute analytical solution at a point for error comparison.
  * @param xx Physical x-coordinate.
