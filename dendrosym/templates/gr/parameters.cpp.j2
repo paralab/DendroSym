@@ -58,6 +58,9 @@ double {{ project_upper }}_BH_MERGE_TIME = std::numeric_limits<double>::max();
 unsigned int {{ project_upper }}_BH_MERGE_STEP = std::numeric_limits<unsigned int>::max();
 unsigned int {{ project_upper }}_BH1_MAX_LEV = 15;
 unsigned int {{ project_upper }}_BH2_MAX_LEV = 15;
+double {{ project_upper }}_BH1_AMR_R   = 1.0;
+double {{ project_upper }}_BH2_AMR_R   = 1.0;
+double {{ project_upper }}_AMR_R_RATIO = 1.618033988749895;
 {% endif %}
 
 // Runtime state
@@ -491,6 +494,14 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     READ_OPTIONAL("refinement", "use_wavelet_tol_function", {{ project_upper }}_USE_WAVELET_TOL_FUNCTION);
     READ_OPTIONAL("refinement", "wavelet_tol_function_r0", {{ project_upper }}_WAVELET_TOL_FUNCTION_R0);
     READ_OPTIONAL("refinement", "wavelet_tol_function_r1", {{ project_upper }}_WAVELET_TOL_FUNCTION_R1);
+    {
+        unsigned int mode_int = static_cast<unsigned int>({{ project_upper }}_REFINEMENT_MODE);
+        try_read(root, "refinement", "mode", mode_int);
+        {{ project_upper }}_REFINEMENT_MODE = static_cast<RefinementMode>(mode_int);
+    }
+{% if enable_bh_tracking %}
+    READ_OPTIONAL("refinement", "amr_r_ratio", {{ project_upper }}_AMR_R_RATIO);
+{% endif %}
 
     // =================================================================
     // [dissipation]
@@ -535,6 +546,8 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
             if (bh.contains("max_lev"))
                 {{ project_upper }}_BH1_MAX_LEV =
                     toml::find<unsigned int>(bh, "max_lev");
+            if (bh.contains("amr_r"))
+                {{ project_upper }}_BH1_AMR_R = toml::find<double>(bh, "amr_r");
         }
         BH1 = BH(mass, bx, by, bz, vx, vy, vz, spin, spin_theta, spin_phi);
         {{ project_upper }}_BH_LOC[0] = Point(bx, by, bz);
@@ -550,6 +563,8 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
             if (bh.contains("max_lev"))
                 {{ project_upper }}_BH2_MAX_LEV =
                     toml::find<unsigned int>(bh, "max_lev");
+            if (bh.contains("amr_r"))
+                {{ project_upper }}_BH2_AMR_R = toml::find<double>(bh, "amr_r");
         }
         BH2 = BH(mass, bx, by, bz, vx, vy, vz, spin, spin_theta, spin_phi);
         {{ project_upper }}_BH_LOC[1] = Point(bx, by, bz);

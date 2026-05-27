@@ -9,6 +9,9 @@
  */
 
 #include "{{ project_name }}Ctx.h"
+{% if enable_bh_tracking %}
+#include "bh_refine.h"
+{% endif %}
 #include "grUtils.h"
 {% if enable_tpid %}
 #include "TwoPunctures.h"
@@ -721,27 +724,50 @@ void {{ project_upper }}Ctx::write_grid_summary_data() {
 bool {{ project_upper }}Ctx::is_remesh() {
     if ({{ project_upper }}_REFINEMENT_MODE == REFINE_MODE_NONE) return false;
 
-    // need to unzip before calling isReMeshUnzip
-    this->unzip(m_var[VL::CPU_EV], m_var[VL::CPU_EV_UZ_IN],
-                {{ project_upper }}_ASYNC_COMM_K);
+    auto run_wamr = [this]() {
+        this->unzip(m_var[VL::CPU_EV], m_var[VL::CPU_EV_UZ_IN],
+                    {{ project_upper }}_ASYNC_COMM_K);
+        DendroScalar *unzipVar[{{ evolution_num_vars }}];
+        m_var[VL::CPU_EV_UZ_IN].to_2d(unzipVar);
+        std::function<double(double, double, double, double *)> wtolFn =
+            [](double, double, double, double *) {
+                return {{ project_upper }}_WAVELET_TOL;
+            };
+        return m_uiMesh->isReMeshUnzip(
+            (const DendroScalar **)unzipVar,
+            {{ project_upper }}_REFINE_VARIABLE_INDICES,
+            {{ project_upper }}_NUM_REFINE_VARS,
+            wtolFn,
+            {{ project_upper }}_DENDRO_AMR_FAC);
+    };
 
-    DendroScalar *unzipVar[{{ evolution_num_vars }}];
-    m_var[VL::CPU_EV_UZ_IN].to_2d(unzipVar);
+{% if enable_bh_tracking %}
+    auto run_bh_loc = [this](bool overwrite) {
+        dendro_gr::BHLocCfg cfg;
+        cfg.bh_locations  = {m_uiBHLoc[0], m_uiBHLoc[1]};
+        cfg.bh_amr_radii  = {{ '{' }}{{ project_upper }}_BH1_AMR_R,
+                             {{ project_upper }}_BH2_AMR_R{{ '}' }};
+        cfg.bh_max_levels = {{ '{' }}{{ project_upper }}_BH1_MAX_LEV,
+                             {{ project_upper }}_BH2_MAX_LEV{{ '}' }};
+        cfg.ratio         = {{ project_upper }}_AMR_R_RATIO;
+        cfg.min_level     = {{ project_upper }}_MINDEPTH;
+        cfg.overwrite     = overwrite;
+        return dendro_gr::isRemeshBH(m_uiMesh, cfg);
+    };
 
-    const unsigned int numRefineVars = {{ project_upper }}_NUM_REFINE_VARS;
-
-    // wavelet tolerance function (constant for now)
-    std::function<double(double, double, double, double *)> waveletTolFunc =
-        [](double x, double y, double z, double *u) {
-            return {{ project_upper }}_WAVELET_TOL;
-        };
-
-    return m_uiMesh->isReMeshUnzip(
-        (const DendroScalar **)unzipVar,
-        {{ project_upper }}_REFINE_VARIABLE_INDICES,
-        numRefineVars,
-        waveletTolFunc,
-        {{ project_upper }}_DENDRO_AMR_FAC);
+    switch ({{ project_upper }}_REFINEMENT_MODE) {
+        case WAMR:    return run_wamr();
+        case BH_LOC:  return run_bh_loc(/*overwrite=*/true);
+        case BH_WAMR: {
+            const bool r1 = run_wamr();
+            const bool r2 = run_bh_loc(/*overwrite=*/false);
+            return r1 || r2;
+        }
+        default: return run_wamr();  // EH/EH_WAMR not yet ported
+    }
+{% else %}
+    return run_wamr();
+{% endif %}
 }
 
 int {{ project_upper }}Ctx::grid_transfer(const ot::Mesh *m_new) {

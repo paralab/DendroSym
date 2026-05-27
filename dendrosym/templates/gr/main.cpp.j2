@@ -207,7 +207,8 @@ int main(int argc, char **argv) {
             if (!ctx->is_remesh()) {
                 if (rank == 0)
                     std::cout << "[init_grid_iter " << iter
-                              << "] mesh converged" << std::endl;
+                              << "] mesh converged (is_remesh=false)"
+                              << std::endl;
                 break;
             }
             DendroIntL old_el_l = ctx->get_mesh()->getNumLocalMeshElements();
@@ -216,14 +217,23 @@ int main(int argc, char **argv) {
                 {{ namespace }}::{{ project_upper }}_LOAD_IMB_TOL,
                 {{ namespace }}::{{ project_upper }}_SPLIT_FIX);
             DendroIntL new_el_l = ctx->get_mesh()->getNumLocalMeshElements();
+            // Allreduce, not Reduce -- the convergence check below uses
+            // these on every rank, so they must be globally consistent.
             DendroIntL old_el_g = 0, new_el_g = 0;
-            par::Mpi_Reduce(&old_el_l, &old_el_g, 1, MPI_SUM, 0, comm);
-            par::Mpi_Reduce(&new_el_l, &new_el_g, 1, MPI_SUM, 0, comm);
+            par::Mpi_Allreduce(&old_el_l, &old_el_g, 1, MPI_SUM, comm);
+            par::Mpi_Allreduce(&new_el_l, &new_el_g, 1, MPI_SUM, comm);
             if (rank == 0)
                 std::cout << "[init_grid_iter " << iter
                           << "] elements " << old_el_g << " -> "
                           << new_el_g << std::endl;
             mesh = ctx->get_mesh();
+            if (new_el_g == old_el_g) {
+                if (rank == 0)
+                    std::cout << "[init_grid_iter " << iter
+                              << "] mesh converged (stable element count)"
+                              << std::endl;
+                break;
+            }
         }
     }
 

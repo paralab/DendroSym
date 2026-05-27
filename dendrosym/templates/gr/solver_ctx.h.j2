@@ -142,9 +142,6 @@ class {{ project_upper }}Ctx : public ts::Ctx<{{ project_upper }}Ctx, DendroScal
     DVec &get_evolution_vars() { return m_var[VL::CPU_EV]; }
     DVec &get_constraint_vars() { return m_var[VL::CPU_CV]; }
     ot::Mesh *get_mesh() { return m_uiMesh; }
-    /**@brief Publish a new mesh pointer; caller must have already done
-     * grid_transfer(m_new). */
-    void set_mesh(ot::Mesh *m_new) { m_uiMesh = m_new; }
 
     void prepare_for_next_iter();
 };
