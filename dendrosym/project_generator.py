@@ -481,6 +481,10 @@ class DendroProjectGenerator:
         ctx["enable_bh_tracking"] = getattr(c, "enable_bh_tracking", False)
         ctx["enable_gw_extraction"] = getattr(c, "enable_gw_extraction", False)
         ctx["enable_tpid"] = getattr(c, "enable_tpid", False)
+        # Fully-qualified C++ symbol for the project's PunctureVarsWriter.
+        # When set, main.cpp.j2 emits the registration call and solver_common
+        # picks up src/<project>_tpid_writer.cpp.
+        ctx["tpid_writer"] = getattr(c, "tpid_writer", "")
         # AH finder: on by default for GR, gated by a compile-time cmake flag
         ctx["enable_ah"] = getattr(c, "enable_ah", True)
 

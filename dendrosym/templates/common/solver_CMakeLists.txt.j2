@@ -54,6 +54,9 @@ set(SOLVER_SRC_FILES
     src/{{ project_name }}Ctx.cpp
     src/physcon.cpp
     src/profile_params.cpp
+{% if tpid_writer %}
+    src/{{ project_name }}_tpid_writer.cpp
+{% endif %}
 )
 
 set(SOLVER_INCLUDE_DIRS
@@ -119,19 +122,10 @@ target_link_libraries(solver_common PUBLIC quadmath)
 solver_add_executable({{ project_name }}Solver {{ project_name }}_main.cpp)
 
 {% if enable_tpid %}
-# TwoPunctures: prefer local TP sources if present, else use dendrolib's.
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/TwoPunctures.cpp")
-    set(_TP_SRC
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/TwoPunctures.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/TPCoordTransf.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/TPEquations.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/TPFuncAndJacobian.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/TPNewton.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/TPUtilities.cpp
-    )
-    target_sources(solver_common PRIVATE ${_TP_SRC})
-    target_compile_options(solver_common PUBLIC -fext-numeric-literals)
-elseif(IS_DIRECTORY "${DENDRO_dendrolib_DIR}/GR/TwoPunctures")
+# TwoPunctures spectral solver sources from dendrolib. Per-project ADM->
+# evolution-variable mapping is registered via TPID::registerPunctureVarsWriter
+# from main; the project supplies src/{{ project_name }}_tpid_writer.cpp.
+if(IS_DIRECTORY "${DENDRO_dendrolib_DIR}/GR/TwoPunctures")
     file(GLOB _TP_SRC "${DENDRO_dendrolib_DIR}/GR/TwoPunctures/*.cpp")
     list(FILTER _TP_SRC EXCLUDE REGEX "TPID\\.cpp$")
     target_sources(solver_common PRIVATE ${_TP_SRC})

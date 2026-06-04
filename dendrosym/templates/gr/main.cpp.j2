@@ -24,6 +24,10 @@
 #include "grUtils.h"
 #include "parameters.h"
 #include "{{ project_name }}Ctx.h"
+{% if tpid_writer %}
+#include "TwoPunctures.h"
+#include "{{ project_name }}_tpid_writer.h"
+{% endif %}
 
 #ifndef NRM
 #define NRM "\x1B[0m"
@@ -48,6 +52,10 @@ int main(int argc, char **argv) {
 
     // read parameters
     {{ namespace }}::readParamFile(argv[1], comm);
+
+{% if tpid_writer %}
+    TPID::registerPunctureVarsWriter({{ tpid_writer }});
+{% endif %}
 
     if (rank == 0) {
         std::cout << GRN << "========================================" << NRM << std::endl;
