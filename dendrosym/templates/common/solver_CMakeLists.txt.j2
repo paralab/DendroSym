@@ -119,14 +119,28 @@ target_link_libraries(solver_common PUBLIC quadmath)
 solver_add_executable({{ project_name }}Solver {{ project_name }}_main.cpp)
 
 {% if enable_tpid %}
-# TwoPunctures initial data -- source files from dendrolib GR/ compiled
-# as part of our solver (they callback into our grUtils for variable filling)
-if(IS_DIRECTORY "${DENDRO_dendrolib_DIR}/GR/TwoPunctures")
+# TwoPunctures: prefer local TP sources if present, else use dendrolib's.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/TwoPunctures.cpp")
+    set(_TP_SRC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/TwoPunctures.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/TPCoordTransf.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/TPEquations.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/TPFuncAndJacobian.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/TPNewton.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/TPUtilities.cpp
+    )
+    target_sources(solver_common PRIVATE ${_TP_SRC})
+    target_compile_options(solver_common PUBLIC -fext-numeric-literals)
+elseif(IS_DIRECTORY "${DENDRO_dendrolib_DIR}/GR/TwoPunctures")
     file(GLOB _TP_SRC "${DENDRO_dendrolib_DIR}/GR/TwoPunctures/*.cpp")
-    # TPID.cpp is a standalone binary (has its own main), exclude it
     list(FILTER _TP_SRC EXCLUDE REGEX "TPID\\.cpp$")
     target_sources(solver_common PRIVATE ${_TP_SRC})
     target_compile_options(solver_common PUBLIC -fext-numeric-literals)
+endif()
+
+# Standalone TPID spectral-solver binary.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/tpid_main.cpp")
+    solver_add_executable({{ project_name }}_tpid src/tpid_main.cpp)
 endif()
 {% endif %}
 

@@ -152,7 +152,7 @@ void twoPuncturesInitEstimate(double x, double y, double z, double *var) {
 
     const double dx_p = xx - TPID::par_b;
     const double dx_m = xx + TPID::par_b;
-    const double eps2 = TPID::TP_epsilon * TPID::TP_epsilon;
+    const double eps2 = TPID::TCP_epsilon * TPID::TCP_epsilon;
     const double r_plus  = std::sqrt(dx_p * dx_p + yy * yy + zz * zz + eps2);
     const double r_minus = std::sqrt(dx_m * dx_m + yy * yy + zz * zz + eps2);
 
@@ -160,7 +160,8 @@ void twoPuncturesInitEstimate(double x, double y, double z, double *var) {
                         + 0.5 * TPID::par_m_plus  / r_plus
                         + 0.5 * TPID::par_m_minus / r_minus;
 
-    var[VAR::U_PSI]      = psi_BL;
+    // BSSN chi for conformally flat BL data: chi = 1/psi_BL^4.
+    var[VAR::U_CHI]      = 1.0 / std::pow(psi_BL, 4);
     var[VAR::U_GAMMAT00] = 1.0;
     var[VAR::U_GAMMAT11] = 1.0;
     var[VAR::U_GAMMAT22] = 1.0;
