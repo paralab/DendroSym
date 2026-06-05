@@ -28,6 +28,7 @@ extern MPI_Comm TP_MPI_COMM;
 #include <sstream>
 
 #include "TreeNode.h"
+#include "meshUtils.h"
 #include "mathUtils.h"
 #include "mesh.h"
 #include "meshUtils.h"
@@ -625,12 +626,15 @@ int {{ project_upper }}Ctx::terminal_output() {
         double l_min = vecMin(&zippedUp[v][nodeBegin], nLocal, comm);
         double l_max = vecMax(&zippedUp[v][nodeBegin], nLocal, comm);
         double l2 = normL2(&zippedUp[v][nodeBegin], nLocal, comm);
+        double l2_vol =
+            std::sqrt(calculateL2FullMeshIntegration(m_uiMesh, zippedUp[v]));
 
         if (rank == 0) {
             std::cout << "\t[var]:  " << std::setw(12)
                       << {{ project_upper }}_VAR_NAMES[v]
-                      << " (min, max, l2) : \t ( "
-                      << l_min << ", " << l_max << ", " << l2 << ") "
+                      << " (min, max, l2, l2_vol) : \t ( "
+                      << l_min << ", " << l_max << ", " << l2 << ", "
+                      << l2_vol << ") "
                       << std::endl;
         }
     }
@@ -699,12 +703,15 @@ int {{ project_upper }}Ctx::terminal_output() {
         double l_min = vecMin(&zippedCons[v][nodeBegin], nLocal, comm);
         double l_max = vecMax(&zippedCons[v][nodeBegin], nLocal, comm);
         double l2 = normL2(&zippedCons[v][nodeBegin], nLocal, comm);
+        double l2_vol =
+            std::sqrt(calculateL2FullMeshIntegration(m_uiMesh, zippedCons[v]));
 
         if (rank == 0) {
             std::cout << "\t[con]:  " << std::setw(12)
                       << {{ project_upper }}_VAR_CONSTRAINT_NAMES[v]
-                      << " (min, max, l2) : \t ( "
-                      << l_min << ", " << l_max << ", " << l2 << ") "
+                      << " (min, max, l2, l2_vol) : \t ( "
+                      << l_min << ", " << l_max << ", " << l2 << ", "
+                      << l2_vol << ") "
                       << std::endl;
         }
     }
