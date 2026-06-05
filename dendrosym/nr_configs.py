@@ -235,7 +235,7 @@ class NRConfig(dendrosym.DendroConfiguration):
         # now generate the metric update code
         return_str += "//// NOW UPDATING THE METRIC VALUES\n"
         return_str += dendrosym.codegen.generate_update_sym_mat_code(
-            metric_name, metric_enums
+            metric_name, metric_enums, include_up=False
         )
 
         return return_str
