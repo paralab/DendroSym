@@ -162,9 +162,9 @@ void twoPuncturesInitEstimate(double x, double y, double z, double *var) {
 
     // BSSN chi for conformally flat BL data: chi = 1/psi_BL^4.
     var[VAR::U_CHI]      = 1.0 / std::pow(psi_BL, 4);
-    var[VAR::U_GAMMAT00] = 1.0;
-    var[VAR::U_GAMMAT11] = 1.0;
-    var[VAR::U_GAMMAT22] = 1.0;
+    var[VAR::U_GT00] = 1.0;
+    var[VAR::U_GT11] = 1.0;
+    var[VAR::U_GT22] = 1.0;
 
     if (TPID::initial_lapse == 2) {
         var[VAR::U_ALPHA] = std::pow(psi_BL, TPID::initial_lapse_psi_exponent);

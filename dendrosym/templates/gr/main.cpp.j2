@@ -110,12 +110,15 @@ int main(int argc, char **argv) {
 {% endif %}
 
     if ({{ namespace }}::{{ project_upper }}_ENABLE_BLOCK_ADAPTIVITY) {
-        // block-adaptive mode (matches BSSN_GR): uniform grid at MINDEPTH
-        // inside [BLK_MIN, BLK_MAX]; outside BLK gets 2:1-balanced AMR.
+        // block-adaptive mode (matches BSSN_GR bssngr_main.cpp:291):
+        // uniform grid at MAXDEPTH-2 inside [BLK_MIN, BLK_MAX]; the
+        // -2 leaves headroom for the mesh constructor's 2:1 balancing
+        // outside the box. Set MAXDEPTH = (desired-uniform-level)+2
+        // to choose the in-box resolution.
         // X_TO_GRIDX/Y/Z relies on OCTREE_MAX being set to (1<<MAXDEPTH)
         // at TOML-load time (see parameters.cpp.j2).
         const unsigned int regLev =
-            {{ namespace }}::{{ project_upper }}_MINDEPTH;
+            {{ namespace }}::{{ project_upper }}_MAXDEPTH - 2;
 
         if (rank == 0)
             std::cout << YLW
@@ -161,7 +164,7 @@ int main(int argc, char **argv) {
     }
 
     // if the wavelet test won't trigger (e.g. flat IC), enable block_adaptivity
-    // in TOML so the mesh seeds uniformly at MINDEPTH
+    // in TOML so the mesh seeds uniformly at MAXDEPTH-2 inside [BLK_MIN, BLK_MAX]
 
     if (rank == 0) std::cout << "Now generating mesh" << std::endl;
 
