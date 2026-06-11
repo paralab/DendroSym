@@ -279,7 +279,27 @@ int main(int argc, char **argv) {
 
     ets->init();
 
-    if (rank == 0) std::cout << "Time stepper initialized." << std::endl;
+    // initial dt from CFL on the finest level (else a no-remesh grid keeps the
+    // par's fixed rk45_time_step_size). Same formula as the remesh block.
+    {
+        unsigned int lmin, lmax;
+        ctx->get_mesh()->computeMinMaxLevel(lmin, lmax);
+        {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE =
+            {{ namespace }}::{{ project_upper }}_CFL_FACTOR *
+            (({{ namespace }}::{{ project_upper }}_COMPD_MAX[0] -
+              {{ namespace }}::{{ project_upper }}_COMPD_MIN[0]) *
+             ((1u << (m_uiMaxDepth - lmax)) /
+              ((double){{ namespace }}::{{ project_upper }}_ELE_ORDER)) /
+             ((double)(1u << m_uiMaxDepth)));
+        ts::TSInfo ts_in = ctx->get_ts_info();
+        ts_in._m_uiTh = {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE;
+        ctx->set_ts_info(ts_in);
+    }
+
+    if (rank == 0)
+        std::cout << "Time stepper initialized. dt="
+                  << {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE
+                  << std::endl;
 
     // main evolution loop
     const unsigned int time_end = {{ namespace }}::{{ project_upper }}_RK_TIME_END;
