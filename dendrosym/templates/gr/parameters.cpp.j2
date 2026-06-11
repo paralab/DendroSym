@@ -126,6 +126,20 @@ unsigned int {{ project_upper }}_VTU_OUTPUT_CONST_INDICES[{{ ncv }}] = {
 {% else %}
 unsigned int {{ project_upper }}_VTU_OUTPUT_CONST_INDICES[1] = {0};
 {% endif %}
+
+// which variables terminal_output computes norms for. Just list the indices in
+// the par ([] = none); the count is the list length. Defaults to all (current
+// behaviour). Each selected var costs a ghost exchange, so narrow these to cut
+// synchronization; constraints are only computed if the constraint list is set.
+std::vector<unsigned int> {{ project_upper }}_TERMINAL_OUTPUT_EVOL_INDICES = {
+{% for i in range(nev) %}    {{ i }}{{ "," if not loop.last else "" }}
+{% endfor %}
+};
+std::vector<unsigned int> {{ project_upper }}_TERMINAL_OUTPUT_CONST_INDICES = {
+{% for i in range(ncv) %}    {{ i }}{{ "," if not loop.last else "" }}
+{% endfor %}
+};
+
 bool {{ project_upper }}_VTU_X_SLICE = true;
 bool {{ project_upper }}_VTU_Y_SLICE = false;
 bool {{ project_upper }}_VTU_Z_SLICE = false;
@@ -498,6 +512,16 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     READ_OPTIONAL("solver", "num_refine_vars", {{ project_upper }}_NUM_REFINE_VARS);
     READ_OPTIONAL("solver", "num_evol_vars_vtu_output", {{ project_upper }}_NUM_EVOL_VARS_VTU_OUTPUT);
     READ_OPTIONAL("solver", "num_const_vars_vtu_output", {{ project_upper }}_NUM_CONST_VARS_VTU_OUTPUT);
+    // terminal_output norm selection: list of variable indices (count = length)
+    if (root.contains("solver")) {
+        const auto& _solver = root.at("solver");
+        if (_solver.contains("terminal_output_evol_indices"))
+            {{ project_upper }}_TERMINAL_OUTPUT_EVOL_INDICES =
+                toml::find<std::vector<unsigned int>>(_solver, "terminal_output_evol_indices");
+        if (_solver.contains("terminal_output_const_indices"))
+            {{ project_upper }}_TERMINAL_OUTPUT_CONST_INDICES =
+                toml::find<std::vector<unsigned int>>(_solver, "terminal_output_const_indices");
+    }
     READ_OPTIONAL("solver", "vtu_x_slice", {{ project_upper }}_VTU_X_SLICE);
     READ_OPTIONAL("solver", "vtu_y_slice", {{ project_upper }}_VTU_Y_SLICE);
     READ_OPTIONAL("solver", "vtu_z_slice", {{ project_upper }}_VTU_Z_SLICE);

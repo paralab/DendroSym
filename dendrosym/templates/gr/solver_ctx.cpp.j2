@@ -40,6 +40,11 @@ extern MPI_Comm TP_MPI_COMM;
 
 namespace {{ namespace }} {
 
+{% if flat_reference_function %}
+// flat-space reference IC (grUtils.cpp), for deviation norms in terminal_output
+void {{ flat_reference_function }}(double x, double y, double z, double *var);
+{% endif %}
+
 // defined in grUtils.cpp
 void initDataFuncToPhysCoords(const double xx, const double yy,
                               const double zz, double *var);
@@ -618,24 +623,55 @@ int {{ project_upper }}Ctx::terminal_output() {
                   << std::endl;
     }
 
-    // print min/max/l2 for each evolution variable
+    // Report per-node + volume-averaged RMS deviation from flat space,
+    // sqrt(int (u - u_flat)^2 dV / V): the per-point departure from the
+    // background, O(amp) and grid-independent. Only the variables listed in
+    // {{ project_upper }}_TERMINAL_OUTPUT_* are computed -- each needs a ghost
+    // exchange, so narrow those in the par to cut synchronization.
+    const size_t dof = m_uiMesh->getDegOfFreedom();
+    const auto& termEvolSel = {{ project_upper }}_TERMINAL_OUTPUT_EVOL_INDICES;
+    const auto& termConsSel = {{ project_upper }}_TERMINAL_OUTPUT_CONST_INDICES;
+
+    // u_flat per var (reference IC is homogeneous -> one eval). Unset -> 0.
+    double flat_ref[{{ evolution_num_vars }}];
+    for (unsigned int v = 0; v < {{ evolution_num_vars }}; v++) flat_ref[v] = 0.0;
     DendroScalar *zippedUp[{{ evolution_num_vars }}];
     m_var[VL::CPU_EV].to_2d(zippedUp);
 
-    for (unsigned int v = 0; v < {{ evolution_num_vars }}; v++) {
-        double l_min = vecMin(&zippedUp[v][nodeBegin], nLocal, comm);
-        double l_max = vecMax(&zippedUp[v][nodeBegin], nLocal, comm);
-        double l2 = normL2(&zippedUp[v][nodeBegin], nLocal, comm);
-        double l2_vol =
-            std::sqrt(calculateL2FullMeshIntegration(m_uiMesh, zippedUp[v]));
+    double invMeshVolume = 0.0;
+    if (!termEvolSel.empty() || !termConsSel.empty()) {
+{% if flat_reference_function %}
+        {{ flat_reference_function }}(0.0, 0.0, 0.0, flat_ref);
+{% endif %}
+        // V = int 1 dV (works for AMR and uniform grids)
+        std::vector<double> onesVec;
+        m_uiMesh->createVector(onesVec);
+        for (size_t i = 0; i < dof; i++) onesVec[i] = 1.0;
+        const double meshVolume =
+            integrateScalarFieldOnMesh(m_uiMesh, onesVec.data());
+        invMeshVolume = (meshVolume > 0.0) ? (1.0 / meshVolume) : 0.0;
+    }
 
-        if (rank == 0) {
-            std::cout << "\t[var]:  " << std::setw(12)
-                      << {{ project_upper }}_VAR_NAMES[v]
-                      << " (min, max, l2, l2_vol) : \t ( "
-                      << l_min << ", " << l_max << ", " << l2 << ", "
-                      << l2_vol << ") "
-                      << std::endl;
+    if (!termEvolSel.empty()) {
+        std::vector<double> devVec;
+        m_uiMesh->createVector(devVec);
+        for (unsigned int v : termEvolSel) {
+            if (v >= {{ evolution_num_vars }}) continue;
+            double l_min = vecMin(&zippedUp[v][nodeBegin], nLocal, comm);
+            double l_max = vecMax(&zippedUp[v][nodeBegin], nLocal, comm);
+            for (size_t i = 0; i < dof; i++) devVec[i] = zippedUp[v][i] - flat_ref[v];
+            // rms = per-node RMS; rms_vol = volume-weighted (AMR-aware)
+            double rms = normRMSE(&devVec[nodeBegin], nLocal, comm);
+            double rms_vol = std::sqrt(
+                calculateL2FullMeshIntegration(m_uiMesh, devVec.data()) * invMeshVolume);
+            if (rank == 0) {
+                std::cout << "\t[var]:  " << std::setw(12)
+                          << {{ project_upper }}_VAR_NAMES[v]
+                          << " (min, max, rms_dev, rms_dev_vol) : \t ( "
+                          << l_min << ", " << l_max << ", " << rms << ", "
+                          << rms_vol << ") "
+                          << std::endl;
+            }
         }
     }
 
@@ -693,26 +729,32 @@ int {{ project_upper }}Ctx::terminal_output() {
 {% endif %}
 
 {% if constraint_num_vars > 0 %}
-    // print constraint norms
-    this->compute_constraint_variables();
+    // constraint norms -- only computed if any are selected (the constraint
+    // computation itself is expensive, so this skips it entirely otherwise)
+    if (!termConsSel.empty()) {
+        this->compute_constraint_variables();
 
-    DendroScalar *zippedCons[{{ constraint_num_vars }}];
-    m_var[VL::CPU_CV].to_2d(zippedCons);
+        DendroScalar *zippedCons[{{ constraint_num_vars }}];
+        m_var[VL::CPU_CV].to_2d(zippedCons);
 
-    for (unsigned int v = 0; v < {{ constraint_num_vars }}; v++) {
-        double l_min = vecMin(&zippedCons[v][nodeBegin], nLocal, comm);
-        double l_max = vecMax(&zippedCons[v][nodeBegin], nLocal, comm);
-        double l2 = normL2(&zippedCons[v][nodeBegin], nLocal, comm);
-        double l2_vol =
-            std::sqrt(calculateL2FullMeshIntegration(m_uiMesh, zippedCons[v]));
+        // constraints -> 0 in the continuum, so RMS is the violation directly
+        for (unsigned int v : termConsSel) {
+            if (v >= {{ constraint_num_vars }}) continue;
+            double l_min = vecMin(&zippedCons[v][nodeBegin], nLocal, comm);
+            double l_max = vecMax(&zippedCons[v][nodeBegin], nLocal, comm);
+            double rms = normRMSE(&zippedCons[v][nodeBegin], nLocal, comm);
+            double rms_vol =
+                std::sqrt(calculateL2FullMeshIntegration(m_uiMesh, zippedCons[v]) *
+                          invMeshVolume);
 
-        if (rank == 0) {
-            std::cout << "\t[con]:  " << std::setw(12)
-                      << {{ project_upper }}_VAR_CONSTRAINT_NAMES[v]
-                      << " (min, max, l2, l2_vol) : \t ( "
-                      << l_min << ", " << l_max << ", " << l2 << ", "
-                      << l2_vol << ") "
-                      << std::endl;
+            if (rank == 0) {
+                std::cout << "\t[con]:  " << std::setw(12)
+                          << {{ project_upper }}_VAR_CONSTRAINT_NAMES[v]
+                          << " (min, max, rms, rms_vol) : \t ( "
+                          << l_min << ", " << l_max << ", " << rms << ", "
+                          << rms_vol << ") "
+                          << std::endl;
+            }
         }
     }
 {% endif %}

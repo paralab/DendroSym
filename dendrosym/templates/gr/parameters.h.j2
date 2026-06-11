@@ -21,6 +21,7 @@
 
 #include <string.h>
 #include <iostream>
+#include <vector>
 
 #include <toml.hpp>
 
@@ -116,6 +117,9 @@ extern unsigned int {{ project_upper }}_NUM_EVOL_VARS_VTU_OUTPUT;
 extern unsigned int {{ project_upper }}_NUM_CONST_VARS_VTU_OUTPUT;
 extern unsigned int {{ project_upper }}_VTU_OUTPUT_EVOL_INDICES[{{ evolution_num_vars }}];
 extern unsigned int {{ project_upper }}_VTU_OUTPUT_CONST_INDICES[{{ constraint_num_vars }}];
+// terminal_output norm selection: variable index lists (count = list length)
+extern std::vector<unsigned int> {{ project_upper }}_TERMINAL_OUTPUT_EVOL_INDICES;
+extern std::vector<unsigned int> {{ project_upper }}_TERMINAL_OUTPUT_CONST_INDICES;
 extern bool {{ project_upper }}_VTU_X_SLICE;
 extern bool {{ project_upper }}_VTU_Y_SLICE;
 extern bool {{ project_upper }}_VTU_Z_SLICE;

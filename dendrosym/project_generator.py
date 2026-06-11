@@ -498,6 +498,13 @@ class DendroProjectGenerator:
 
         ctx["enable_analytical"] = getattr(c, "enable_analytical", False)
 
+        # name of a homogeneous flat-space (Minkowski) IC function, used by the
+        # terminal_output dump to report volume-averaged RMS deviation from flat
+        # space (the meaningful "error" metric for flat/noise tests). Optional;
+        # when unset the dump falls back to a 0 reference (raw RMS).
+        ctx["flat_reference_function"] = getattr(c, "flat_reference_function",
+                                                 None)
+
         # symbolic IC + analytical -> C code via DendroCPrinter
         import sympy as sym
         from dendrosym.code_printer import DendroCPrinter
