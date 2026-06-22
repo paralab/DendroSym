@@ -823,6 +823,52 @@ def calc_symmetric_part_rank2(M):
     )
 
 
+def build_sym_3x3(f, mode="upper"):
+    """Build a symmetric 3x3 tensor from a function of its upper triangle.
+
+    `f(i, j)` is evaluated only on the canonical entries ``i <= j`` and the
+    result is shared into both ``[i, j]`` and ``[j, i]``. The off-diagonal of
+    the returned matrix is then the *same* SymPy object in both slots, so the
+    matrix is exactly symmetric by construction -- it does not rely on the
+    expressions for ``[i, j]`` and ``[j, i]`` happening to canonicalize to the
+    same generated code. It also evaluates 6 entries instead of 9.
+
+    Use this in place of the
+    ``sym.Matrix([... for ii, jj in e_ij]).reshape(3, 3)`` idiom whenever the
+    result is meant to be symmetric.
+
+    Parameters
+    ----------
+    f : callable
+        ``f(i, j) -> sympy expression`` for the ``(i, j)`` component. Only
+        called with ``i <= j`` when ``mode == "upper"``; called with both
+        orderings when ``mode == "average"``.
+    mode : str, optional
+        ``"upper"`` (default): share ``f(i, j)`` into both off-diagonal slots
+        -- use when the construction is manifestly symmetric (Hessians, Ricci,
+        contractions of symmetric quantities).
+        ``"average"``: store ``(f(i, j) + f(j, i)) / 2`` in both off-diagonal
+        slots -- the principled symmetrization for a construction that is only
+        symmetric on-shell (e.g. vector-derivative sources). Equivalent in
+        spirit to :func:`calc_symmetric_part_rank2` but builds from a function
+        rather than symmetrizing an already-built matrix.
+
+    Returns
+    -------
+    sympy.Matrix
+        The symmetric 3x3 tensor.
+    """
+
+    M = sym.zeros(3, 3)
+    for i in range(3):
+        for j in range(i, 3):
+            if mode == "average" and i != j:
+                M[i, j] = M[j, i] = sym.Rational(1, 2) * (f(i, j) + f(j, i))
+            else:
+                M[i, j] = M[j, i] = f(i, j)
+    return M
+
+
 ##########################################################################
 # metric related functions
 ##########################################################################
