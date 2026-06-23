@@ -380,6 +380,10 @@ int main(int argc, char **argv) {
             if (rank == 0)
                 std::cout << "[MERGER DETECTED] t=" << time << std::endl;
         }
+
+        if ((step % ts_output_freq) == 0) {
+            ctx->write_bh_coords();
+        }
 {% endif %}
 
         if ((step % ts_output_freq) == 0) {

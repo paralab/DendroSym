@@ -21,6 +21,9 @@ extern MPI_Comm TP_MPI_COMM;
 {% if enable_gw_extraction %}
 #include "gwExtract.h"
 {% endif %}
+{% if enable_bh_tracking %}
+#include "punctureTracker.h"
+{% endif %}
 
 #include <cmath>
 #include <iomanip>
@@ -891,7 +894,42 @@ int {{ project_upper }}Ctx::restore_checkpt() { return 0; }
 
 {% if enable_bh_tracking %}
 void {{ project_upper }}Ctx::evolve_bh_loc() {
-    // TODO: implement shift interpolation at BH locations
+    // first call (e.g. step 0): seed the history, nothing to integrate yet
+    if (m_uiBHTimeHistory.empty()) {
+        store_bh_loc_history();
+        return;
+    }
+    // dt since the last tracked time; guard against a repeat call at same t
+    const double dt = m_uiTinfo._m_uiT - m_uiBHTimeHistory.back();
+    if (dt <= 0.0) return;
+
+    DVec &m_evar = m_var[VL::CPU_EV];
+    m_uiMesh->readFromGhostBegin(m_evar.get_vec_ptr(), m_evar.get_dof());
+    m_uiMesh->readFromGhostEnd(m_evar.get_vec_ptr(), m_evar.get_dof());
+    DendroScalar *evar[{{ evolution_num_vars }}];
+    m_evar.to_2d(evar);
+
+    const unsigned int beta_idx[3] = {VAR::U_BETA0, VAR::U_BETA1, VAR::U_BETA2};
+    Point grid_limits[2] = {
+        Point({{ project_upper }}_OCTREE_MIN[0], {{ project_upper }}_OCTREE_MIN[1],
+              {{ project_upper }}_OCTREE_MIN[2]),
+        Point({{ project_upper }}_OCTREE_MAX[0], {{ project_upper }}_OCTREE_MAX[1],
+              {{ project_upper }}_OCTREE_MAX[2])};
+    Point domain_limits[2] = {
+        Point({{ project_upper }}_COMPD_MIN[0], {{ project_upper }}_COMPD_MIN[1],
+              {{ project_upper }}_COMPD_MIN[2]),
+        Point({{ project_upper }}_COMPD_MAX[0], {{ project_upper }}_COMPD_MAX[1],
+              {{ project_upper }}_COMPD_MAX[2])};
+
+    Point newLoc[2];
+    dendro_gr::trackPunctures(m_uiMesh, (double **)evar, beta_idx, m_uiBHLoc,
+                              newLoc, 2, grid_limits, domain_limits, dt);
+
+    m_uiBHLoc[0] = newLoc[0];
+    m_uiBHLoc[1] = newLoc[1];
+    {{ project_upper }}_BH_LOC[0] = m_uiBHLoc[0];
+    {{ project_upper }}_BH_LOC[1] = m_uiBHLoc[1];
+    store_bh_loc_history();
 }
 
 void {{ project_upper }}Ctx::store_bh_loc_history() {
@@ -899,7 +937,12 @@ void {{ project_upper }}Ctx::store_bh_loc_history() {
     m_uiBHTimeHistory.push_back(m_uiTinfo._m_uiT);
 }
 
-int {{ project_upper }}Ctx::write_bh_coords() { return 0; }
+int {{ project_upper }}Ctx::write_bh_coords() {
+    dendro_gr::writeBHTrajectory(m_uiMesh, m_uiBHLoc, 2, m_uiTinfo._m_uiStep,
+                                 m_uiTinfo._m_uiT,
+                                 {{ project_upper }}_PROFILE_FILE_PREFIX);
+    return 0;
+}
 
 bool {{ project_upper }}Ctx::is_bh_merged(double tol) {
     if (m_bIsBHMerged) return true;
