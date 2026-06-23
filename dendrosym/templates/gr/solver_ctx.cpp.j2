@@ -41,6 +41,14 @@ extern MPI_Comm TP_MPI_COMM;
 #include "octUtils.h"
 #include "point.h"
 
+// checkpoint I/O primitives (dendrolib): binary octree + variable I/O, plus the
+// nlohmann `json` alias (from checkPoint.h) used for the self-describing meta.
+#include "checkPoint.h"
+#include <filesystem>
+{% if enable_bh_tracking %}
+#include "b91_util.h"  // base91 encode/decode for the compact BH-history blob
+{% endif %}
+
 namespace {{ namespace }} {
 
 {% if flat_reference_function %}
@@ -126,7 +134,12 @@ void initDataFuncToPhysCoords(const double xx, const double yy,
 
 int {{ project_upper }}Ctx::initialize() {
     if ({{ project_upper }}_RESTORE_SOLVER) {
-        restore_checkpt();
+        // initialize() is called again from ets->init(); restore exactly once
+        // so we don't re-read the checkpoint / rebuild the mesh a second time.
+        if (!m_bCheckpointRestored) {
+            restore_checkpt();
+            m_bCheckpointRestored = true;
+        }
         return 0;
     }
 
@@ -882,11 +895,316 @@ void {{ project_upper }}Ctx::calculate_full_grid_size() {
 }
 
 // =========================================================================
-// checkpointing (stubs -- implement as needed)
+// checkpointing
+//
+// Two alternating slots (0/1) for crash safety, plus a `<prefix>.latest`
+// sentinel written LAST via an atomic rename: a crash mid-write never advances
+// it, so restore always lands on the last *fully complete* checkpoint. The
+// metadata is a single self-describing, versioned JSON file -- adding new state
+// is one line in write_checkpt() + one defaulted line in restore_checkpt().
+// The heavy mesh/variable data uses dendrolib's binary io::checkpoint helpers.
 // =========================================================================
 
-int {{ project_upper }}Ctx::write_checkpt() { return 0; }
-int {{ project_upper }}Ctx::restore_checkpt() { return 0; }
+// checkpoint layout version -- bump only on an incompatible format change.
+static const unsigned int {{ project_upper }}_CHKPT_FORMAT_VERSION = 1;
+
+int {{ project_upper }}Ctx::write_checkpt() {
+    if (!m_uiMesh->isActive()) return 0;
+
+    const unsigned int rank = m_uiMesh->getMPIRank();
+    const unsigned int slot =
+        (m_uiTinfo._m_uiStep / {{ project_upper }}_CHECKPT_FREQ) % 2;
+
+    char fname[512];
+
+    // (1) octree topology -- one binary file per (active) rank
+    const ot::TreeNode *pNodes = &(*(m_uiMesh->getAllElements().begin() +
+                                     m_uiMesh->getElementLocalBegin()));
+    sprintf(fname, "%s_%u_octree_%u.oct",
+            {{ project_upper }}_CHKPT_FILE_PREFIX.c_str(), slot, rank);
+    io::checkpoint::writeOctToFile(fname, pNodes,
+                                   m_uiMesh->getNumLocalMeshElements());
+
+    // (2) evolution variables -- one binary file per (active) rank
+    DendroScalar *eVar[{{ evolution_num_vars }}];
+    m_var[VL::CPU_EV].to_2d(eVar);
+    sprintf(fname, "%s_%u_vars_%u.var",
+            {{ project_upper }}_CHKPT_FILE_PREFIX.c_str(), slot, rank);
+    io::checkpoint::writeVecToFile(fname, m_uiMesh, (const DendroScalar **)eVar,
+                                   {{ evolution_num_vars }});
+
+    // (3) self-describing metadata -- single JSON file (active rank 0)
+    if (rank == 0) {
+        json meta;
+        meta["format_version"] = {{ project_upper }}_CHKPT_FORMAT_VERSION;
+        meta["num_evol_vars"]  = {{ evolution_num_vars }};
+        // element order from the mesh (authoritative; m_uiElementOrder is not
+        // guaranteed initialized in the ctx).
+        meta["ele_order"]      = m_uiMesh->getElementOrder();
+        meta["active_comm_sz"] = m_uiMesh->getMPICommSize();
+        meta["time"]["tb"]     = m_uiTinfo._m_uiTb;
+        meta["time"]["te"]     = m_uiTinfo._m_uiTe;
+        meta["time"]["t"]      = m_uiTinfo._m_uiT;
+        meta["time"]["step"]   = m_uiTinfo._m_uiStep;
+        meta["time"]["dt"]     = m_uiTinfo._m_uiTh;
+        meta["wavelet_tol"]    = {{ project_upper }}_WAVELET_TOL;
+        meta["load_imb_tol"]   = {{ project_upper }}_LOAD_IMB_TOL;
+{% if enable_bh_tracking %}
+        meta["bh"]["loc"] = json::array({
+            json::array({m_uiBHLoc[0].x(), m_uiBHLoc[0].y(), m_uiBHLoc[0].z()}),
+            json::array({m_uiBHLoc[1].x(), m_uiBHLoc[1].y(), m_uiBHLoc[1].z()})});
+        meta["bh"]["merged"]     = m_bIsBHMerged;
+        meta["bh"]["merge_time"] = m_dMergeTime;
+        meta["bh"]["merge_step"] = m_uiMergeStep;
+        // BH location/time history -> flat double vectors -> base91 (compact,
+        // self-describing length; mirrors dendro_bh::BHHistory::encode).
+        std::vector<double> locHist;
+        locHist.reserve(m_uiBHLocHistory.size() * 6);
+        for (const auto &p : m_uiBHLocHistory) {
+            locHist.push_back(p.first.x());
+            locHist.push_back(p.first.y());
+            locHist.push_back(p.first.z());
+            locHist.push_back(p.second.x());
+            locHist.push_back(p.second.y());
+            locHist.push_back(p.second.z());
+        }
+        meta["bh"]["loc_history_b91"]  = dendro_aeh::b91_encode(locHist);
+        meta["bh"]["time_history_b91"] = dendro_aeh::b91_encode(m_uiBHTimeHistory);
+{% endif %}
+        sprintf(fname, "%s_%u.meta.json",
+                {{ project_upper }}_CHKPT_FILE_PREFIX.c_str(), slot);
+        std::ofstream mf(fname);
+        mf << std::setw(2) << meta << std::endl;
+        mf.close();
+    }
+
+    // (4) sentinel: barrier so every active rank's .oct/.var/.meta is flushed,
+    //     then rank 0 atomically publishes which slot is now complete + valid.
+    MPI_Barrier(m_uiMesh->getMPICommunicator());
+    if (rank == 0) {
+        json latest;
+        latest["format_version"] = {{ project_upper }}_CHKPT_FORMAT_VERSION;
+        latest["slot"]           = slot;
+        latest["step"]           = (uint64_t)m_uiTinfo._m_uiStep;
+        char tmpf[512], finalf[512];
+        sprintf(tmpf, "%s.latest.tmp",
+                {{ project_upper }}_CHKPT_FILE_PREFIX.c_str());
+        sprintf(finalf, "%s.latest", {{ project_upper }}_CHKPT_FILE_PREFIX.c_str());
+        std::ofstream lf(tmpf);
+        lf << latest << std::endl;
+        lf.close();
+        std::filesystem::rename(tmpf, finalf);  // atomic publish
+        std::cout << "[{{ project_name }}] checkpoint written: slot " << slot
+                  << " step " << m_uiTinfo._m_uiStep
+                  << " t=" << m_uiTinfo._m_uiT << std::endl;
+    }
+    return 0;
+}
+
+int {{ project_upper }}Ctx::restore_checkpt() {
+    MPI_Comm comm = m_uiMesh->getMPIGlobalCommunicator();
+    int rank, npes;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &npes);
+
+    // (1) rank 0 reads the sentinel to find the last complete slot; broadcast.
+    int slot = -1;
+    if (rank == 0) {
+        char lname[512];
+        sprintf(lname, "%s.latest", {{ project_upper }}_CHKPT_FILE_PREFIX.c_str());
+        if (std::filesystem::exists(lname)) {
+            std::ifstream lf(lname);
+            json latest;
+            lf >> latest;
+            slot = latest.value("slot", -1);
+        }
+    }
+    par::Mpi_Bcast(&slot, 1, 0, comm);
+
+    if (slot < 0) {
+        if (!rank)
+            std::cout << "[{{ project_name }}] no valid checkpoint ("
+                      << {{ project_upper }}_CHKPT_FILE_PREFIX
+                      << ".latest missing) -- starting from initial data."
+                      << std::endl;
+        init_grid();
+        return 0;
+    }
+
+    // (2) every rank reads the (small) self-describing metadata for that slot.
+    char fname[512];
+    sprintf(fname, "%s_%d.meta.json",
+            {{ project_upper }}_CHKPT_FILE_PREFIX.c_str(), slot);
+    json meta;
+    {
+        std::ifstream mf(fname);
+        if (!mf) {
+            if (!rank)
+                std::cerr << "[{{ project_name }}] checkpoint metadata missing: "
+                          << fname << std::endl;
+            MPI_Abort(comm, 0);
+        }
+        mf >> meta;
+    }
+
+    const unsigned int file_nvars = meta.value("num_evol_vars", 0u);
+    if (file_nvars != {{ evolution_num_vars }}) {
+        if (!rank)
+            std::cerr << "[{{ project_name }}] checkpoint var-count mismatch: file="
+                      << file_nvars << " expected=" << {{ evolution_num_vars }}
+                      << std::endl;
+        MPI_Abort(comm, 0);
+    }
+    const unsigned int active_comm_sz = meta["active_comm_sz"];
+    // element order from the checkpoint (the ctx's m_uiElementOrder may be
+    // unset here; the metadata value is authoritative for rebuilding the mesh).
+    const unsigned int ele_order = meta["ele_order"].get<unsigned int>();
+
+    // restore time-stepper state (the ETS pulls this via get_ts_info()).
+    m_uiTinfo._m_uiTb   = meta["time"]["tb"].get<double>();
+    m_uiTinfo._m_uiTe   = meta["time"]["te"].get<double>();
+    m_uiTinfo._m_uiT    = meta["time"]["t"].get<double>();
+    m_uiTinfo._m_uiStep = meta["time"]["step"].get<unsigned int>();
+    m_uiTinfo._m_uiTh   = meta["time"]["dt"].get<double>();
+
+{% if enable_bh_tracking %}
+    if (meta.contains("bh")) {
+        const auto &bh = meta["bh"];
+        m_uiBHLoc[0] = Point(bh["loc"][0][0].get<double>(),
+                             bh["loc"][0][1].get<double>(),
+                             bh["loc"][0][2].get<double>());
+        m_uiBHLoc[1] = Point(bh["loc"][1][0].get<double>(),
+                             bh["loc"][1][1].get<double>(),
+                             bh["loc"][1][2].get<double>());
+        {{ project_upper }}_BH_LOC[0] = m_uiBHLoc[0];
+        {{ project_upper }}_BH_LOC[1] = m_uiBHLoc[1];
+        m_bIsBHMerged = bh.value("merged", false);
+        m_dMergeTime  = bh.value("merge_time",
+                                 std::numeric_limits<double>::max());
+        m_uiMergeStep = bh.value("merge_step",
+                                 std::numeric_limits<uint32_t>::max());
+        m_uiBHLocHistory.clear();
+        m_uiBHTimeHistory.clear();
+        if (bh.contains("loc_history_b91") && bh.contains("time_history_b91")) {
+            std::vector<double> lh = dendro_aeh::b91_decode<double>(
+                bh["loc_history_b91"].get<std::string>());
+            std::vector<double> th = dendro_aeh::b91_decode<double>(
+                bh["time_history_b91"].get<std::string>());
+            for (size_t i = 0; i + 5 < lh.size(); i += 6)
+                m_uiBHLocHistory.push_back(std::make_pair(
+                    Point(lh[i], lh[i + 1], lh[i + 2]),
+                    Point(lh[i + 3], lh[i + 4], lh[i + 5])));
+            m_uiBHTimeHistory.assign(th.begin(), th.end());
+        }
+    }
+{% endif %}
+
+    if (active_comm_sz > (unsigned int)npes) {
+        if (!rank)
+            std::cerr << "[{{ project_name }}] checkpoint was written with "
+                      << active_comm_sz << " active ranks; cannot restore on "
+                      << npes << " (communicator shrinking unsupported)."
+                      << std::endl;
+        MPI_Abort(comm, 0);
+    }
+
+    // (3) active ranks read their octree slice (file index = active rank).
+    const bool isActive = ((unsigned int)rank < active_comm_sz);
+    MPI_Comm activeComm;
+    par::splitComm2way(!isActive, &activeComm, comm);
+
+    std::vector<ot::TreeNode> octree;
+    int readStatus = 0, readStatusG = 0;
+    if (isActive) {
+        int activeRank;
+        MPI_Comm_rank(activeComm, &activeRank);
+        sprintf(fname, "%s_%d_octree_%d.oct",
+                {{ project_upper }}_CHKPT_FILE_PREFIX.c_str(), slot, activeRank);
+        readStatus = io::checkpoint::readOctFromFile(fname, octree);
+    }
+    par::Mpi_Allreduce(&readStatus, &readStatusG, 1, MPI_MAX, comm);
+    if (readStatusG != 0) {
+        if (!rank)
+            std::cerr << "[{{ project_name }}] checkpoint octree (.oct) read "
+                         "failed/corrupt." << std::endl;
+        MPI_Abort(comm, 0);
+    }
+
+    // (4) rebuild the mesh from the restored octree.
+    ot::Mesh *newMesh =
+        new ot::Mesh(octree, 1, ele_order, active_comm_sz, comm);
+    newMesh->setDomainBounds(
+        Point({{ project_upper }}_GRID_MIN_X, {{ project_upper }}_GRID_MIN_Y,
+              {{ project_upper }}_GRID_MIN_Z),
+        Point({{ project_upper }}_GRID_MAX_X, {{ project_upper }}_GRID_MAX_Y,
+              {{ project_upper }}_GRID_MAX_Z));
+
+    // (5) move every mesh-sized allocation onto the new mesh.
+    ot::dealloc_mpi_ctx<DendroScalar>(m_uiMesh, m_mpi_ctx,
+                                      {{ evolution_num_vars }},
+                                      {{ project_upper }}_ASYNC_COMM_K);
+    for (unsigned int i = 0; i < VL::END; i++) m_var[i].destroy_vector();
+
+    m_var[VL::CPU_EV].create_vector(newMesh, ot::DVEC_TYPE::OCT_SHARED_NODES,
+        ot::DVEC_LOC::HOST, {{ evolution_num_vars }}, true);
+    m_var[VL::CPU_EV_UZ_IN].create_vector(newMesh,
+        ot::DVEC_TYPE::OCT_LOCAL_WITH_PADDING, ot::DVEC_LOC::HOST,
+        {{ evolution_num_vars }}, true);
+    m_var[VL::CPU_EV_UZ_OUT].create_vector(newMesh,
+        ot::DVEC_TYPE::OCT_LOCAL_WITH_PADDING, ot::DVEC_LOC::HOST,
+        {{ evolution_num_vars }}, true);
+{% if constraint_num_vars > 0 %}
+    m_var[VL::CPU_CV].create_vector(newMesh, ot::DVEC_TYPE::OCT_SHARED_NODES,
+        ot::DVEC_LOC::HOST, {{ constraint_num_vars }}, true);
+    m_var[VL::CPU_CV_UZ_IN].create_vector(newMesh,
+        ot::DVEC_TYPE::OCT_LOCAL_WITH_PADDING, ot::DVEC_LOC::HOST,
+        {{ constraint_num_vars }}, true);
+{% endif %}
+{% if enable_analytical %}
+    m_var[VL::CPU_ANALYTIC].create_vector(newMesh,
+        ot::DVEC_TYPE::OCT_SHARED_NODES, ot::DVEC_LOC::HOST,
+        {{ evolution_num_vars }}, true);
+    m_var[VL::CPU_ANALYTIC_DIFF].create_vector(newMesh,
+        ot::DVEC_TYPE::OCT_SHARED_NODES, ot::DVEC_LOC::HOST,
+        {{ evolution_num_vars }}, true);
+{% endif %}
+
+    ot::alloc_mpi_ctx<DendroScalar>(newMesh, m_mpi_ctx,
+                                    {{ evolution_num_vars }},
+                                    {{ project_upper }}_ASYNC_COMM_K);
+
+    // (6) active ranks load the evolution variables onto the new mesh.
+    if (isActive) {
+        int activeRank;
+        MPI_Comm_rank(activeComm, &activeRank);
+        DendroScalar *inVar[{{ evolution_num_vars }}];
+        m_var[VL::CPU_EV].to_2d(inVar);
+        sprintf(fname, "%s_%d_vars_%d.var",
+                {{ project_upper }}_CHKPT_FILE_PREFIX.c_str(), slot, activeRank);
+        readStatus = io::checkpoint::readVecFromFile(fname, newMesh, inVar,
+                                                     {{ evolution_num_vars }});
+    }
+    MPI_Comm_free(&activeComm);
+    par::Mpi_Allreduce(&readStatus, &readStatusG, 1, MPI_MAX, comm);
+    if (readStatusG != 0) {
+        if (!rank)
+            std::cerr << "[{{ project_name }}] checkpoint variables (.var) read "
+                         "failed/corrupt." << std::endl;
+        MPI_Abort(comm, 0);
+    }
+
+    // (7) swap in the restored mesh; main re-sizes derivs + builds the ETS
+    //     (which picks up the restored TSInfo) after initialize() returns.
+    std::swap(m_uiMesh, newMesh);
+    delete newMesh;
+
+    if (!rank)
+        std::cout << "[{{ project_name }}] checkpoint restore OK -- resuming at"
+                  << " step " << m_uiTinfo._m_uiStep
+                  << " t=" << m_uiTinfo._m_uiT << " (slot " << slot << ")"
+                  << std::endl;
+    return 0;
+}
 
 // =========================================================================
 // black hole tracking

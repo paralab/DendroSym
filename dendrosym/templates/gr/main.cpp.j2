@@ -208,7 +208,9 @@ int main(int argc, char **argv) {
     // apply real IC once, then refine; intergrid transfer interpolates so
     // the expensive IC is only evaluated at the initial coarse mesh.
     ctx->initialize();
-    {
+    // On restore, the mesh + state come straight from the checkpoint; skip the
+    // initial-refinement loop so we don't remesh/alter the restored grid.
+    if (!{{ namespace }}::{{ project_upper }}_RESTORE_SOLVER) {
         const unsigned int max_iter =
             {{ namespace }}::{{ project_upper }}_INIT_GRID_ITER;
         if (rank == 0)
@@ -247,6 +249,11 @@ int main(int argc, char **argv) {
             }
         }
     }
+
+    // keep the local mesh pointer current: init_grid_iter (or a checkpoint
+    // restore) may have replaced the mesh inside the ctx, leaving the original
+    // `mesh` dangling. Track ctx->get_mesh() so the final `delete mesh` is safe.
+    mesh = ctx->get_mesh();
 
     if ({{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE != nullptr) {
         delete[] {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE;

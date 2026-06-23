@@ -63,6 +63,9 @@ class {{ project_upper }}Ctx : public ts::Ctx<{{ project_upper }}Ctx, DendroScal
 
     // State flags
     bool m_bConstraintsComputed;
+    // checkpoint restore guard: initialize() is invoked twice (once directly,
+    // once from ets->init()); restore only on the first call.
+    bool m_bCheckpointRestored = false;
 
     // Grid stats
     DendroIntL m_uiGlobalMeshElements;
