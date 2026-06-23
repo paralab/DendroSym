@@ -260,6 +260,8 @@ int VERBOSITY_LEVEL                             = 1;
 // order must be: chi, trK, At[6 symmetric], gt[6 symmetric]
 // to match the transform lambda below
 const std::vector<int> AH_INDICES = {
+{% if ah_input_vars %}{% for vname in ah_input_vars %}    {{ namespace }}::VAR::U_{{ vname | upper }},
+{% endfor %}{% else %}
 {% for vname in evolution_var_names %}{% if vname == 'chi' %}    {{ namespace }}::VAR::U_{{ vname | upper }},
 {% endif %}{% endfor %}
 {% for vname in evolution_var_names %}{% if vname in ['trK', 'K'] %}    {{ namespace }}::VAR::U_{{ vname | upper }},
@@ -268,6 +270,7 @@ const std::vector<int> AH_INDICES = {
 {% endif %}{% endfor %}
 {% for vname in evolution_var_names %}{% if vname.startswith('gt') or vname.startswith('gt_mat') %}    {{ namespace }}::VAR::U_{{ vname | upper }},
 {% endif %}{% endfor %}
+{% endif %}
 };
 
 }  // namespace AH
@@ -757,12 +760,14 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
         bool is_bbh = false;
 {% endif %}
 
-        // bssn-to-adm transform: converts chi, trK, At, gt -> physical gd, Kd
-        // this is the same for any BSSN-based conformal decomposition
+        // transform: maps the interpolated evolution vars (AH_INDICES order)
+        // to the 12 physical components [gd[6], Kd[6]] BHaHAHA expects.
         auto transform = [](const std::vector<double>& inputs) {
+{% if ah_transform_body %}{{ ah_transform_body }}
+{% else %}
+            // default: BSSN-style (chi, trK, At[6], gt[6])
             std::vector<double> output(12, 0.0);
 
-            // input order matches AH_INDICES: chi, trK, At[6], gt[6]
             const double chi     = inputs[0];
             const double trK_val = inputs[1];
             const double inv_chi = 1.0 / chi;
@@ -777,6 +782,7 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
                 output[6 + i] = inputs[2 + i] * inv_chi + output[i] * trK_third;
 
             return output;
+{% endif %}
         };
 
         Point grid_limits[2];

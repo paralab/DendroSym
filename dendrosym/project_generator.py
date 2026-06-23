@@ -487,6 +487,13 @@ class DendroProjectGenerator:
         ctx["tpid_writer"] = getattr(c, "tpid_writer", "")
         # AH finder: on by default for GR, gated by a compile-time cmake flag
         ctx["enable_ah"] = getattr(c, "enable_ah", True)
+        # AH metric-input mapping (formulation-specific). When set, the template
+        # builds AH_INDICES from ah_input_vars and the BHaHAHA input transform
+        # from ah_transform_body; otherwise it falls back to the BSSN-style
+        # (chi, trK, At, gt) default. Z4 formulations (CCZ4) must supply these
+        # since the evolved trace is Khat = K - 2 s Theta, not a bare trK.
+        ctx["ah_input_vars"] = getattr(c, "ah_input_vars", None)
+        ctx["ah_transform_body"] = getattr(c, "ah_transform_body", None)
 
         # derivative system: if set, emit DendroDerivatives method calls
         ctx["deriv_obj"] = getattr(c, "deriv_obj", "")
