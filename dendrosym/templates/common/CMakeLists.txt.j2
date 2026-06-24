@@ -83,7 +83,9 @@ option(DVEC_ZERO_ALLOC "Initialize DVec memory allocation as zeros" OFF)
 option(DENDRO_USE_NEW_DERIVS "Use the new DendroDerivatives system" OFF)
 
 set(KWAY 128 CACHE STRING 128)
-set(OCT2BLK_COARSEST_LEV 0 CACHE STRING 0)
+# Caps octree->block fusion. 0 lets a uniform region fuse into one giant block whose
+# deriv workspace can OOM/segfault single-rank; a moderate value keeps blocks small.
+set(OCT2BLK_COARSEST_LEV 4 CACHE STRING "Coarsest octree->block fusion level")
 set(NUM_NPES_THRESHOLD 2 CACHE STRING 2)
 
 # ghost compression needs to be defined outside dendrolib as well
