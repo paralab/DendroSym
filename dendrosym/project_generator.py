@@ -82,8 +82,8 @@ def _rewrite_deriv_calls(code: str, deriv_obj: str,
 
 
 # bump when the gencode pipeline changes in a way that invalidates old caches
-# (e.g. changing the printer, CSE settings, or .cpp.inc layout)
-_CACHE_SCHEMA_VERSION = "v1"
+# (e.g. changing the printer, CSE settings, .cpp.inc layout, or bcs/ko emission)
+_CACHE_SCHEMA_VERSION = "v2"
 
 
 def _vt_worker_init(inner_workers):

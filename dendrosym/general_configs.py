@@ -395,7 +395,9 @@ class DendroConfiguration:
                 f"BCS information was not initialized for {var_type}."
             )
 
-        return_str = ""
+        # collect one (rhs, field, grads, falloff, asymptotic) row per variable,
+        # then emit a single data-table + loop instead of N unrolled calls.
+        rows = []
 
         for ii, the_var in enumerate(all_var_info["vars"]):
             var_info = all_var_info["info"][ii]
@@ -427,39 +429,27 @@ class DendroConfiguration:
                                 print(f"FAILURE {var_info}")
                                 raise Exception
 
-                    return_str += dendrosym.codegen.generate_bcs_function_call(
-                        rhs_var[0],
-                        clean_var,
-                        falloff,
-                        asymptotic,
-                        grad_vars,
-                        self.project_name,
-                        pmin,
-                        pmax,
-                        sz,
-                        bflag,
+                    rows.append(
+                        (rhs_var[0], clean_var, grad_vars, falloff, asymptotic)
                     )
-
-                pass
 
             else:
                 rhs_var = self.generate_rhs_var_names(cleaned_var_name)
 
                 grad_vars = self.create_grad_var_names(cleaned_var_name, "grad", 3)
-                return_str += dendrosym.codegen.generate_bcs_function_call(
-                    rhs_var[0],
-                    cleaned_var_name[0],
-                    var_info[0],
-                    var_info[1],
-                    grad_vars,
-                    self.project_name,
-                    pmin,
-                    pmax,
-                    sz,
-                    bflag,
+                rows.append(
+                    (
+                        rhs_var[0],
+                        cleaned_var_name[0],
+                        grad_vars,
+                        var_info[0],
+                        var_info[1],
+                    )
                 )
 
-        return return_str
+        return dendrosym.codegen.generate_bcs_table(
+            rows, self.project_name, pmin, pmax, sz, bflag
+        )
 
     def generate_variable_extraction(
         self,

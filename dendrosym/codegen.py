@@ -1448,6 +1448,54 @@ def generate_bcs_function_call(
     return temp_str
 
 
+def generate_bcs_table(
+    rows,
+    prefix="ccz4",
+    pmin="pmin",
+    pmax="pmax",
+    sz="sz",
+    bflag="bflag",
+):
+    """Generate one data-table + loop for the Sommerfeld BCs.
+
+    `rows` is a list of (var_rhs_name, var_name, deriv_names, falloff,
+    asymptotic). Emits a local `{rhs, field, dx, dy, dz, falloff, asymptotic}`
+    table and a single `{prefix}_bcs(...)` loop over it, instead of N unrolled
+    calls. Bit-identical (same args, same order) -- just far less generated
+    clutter, and the per-variable falloff/asymptotic read as a data block.
+    """
+    if not rows:
+        return ""
+
+    out = (
+        "    // per-variable sommerfeld bc data: {rhs, field, dx, dy, dz,"
+        " falloff, asymptotic}\n"
+        "    struct __bc_row {\n"
+        "        double *rhs;\n"
+        "        const double *f, *gx, *gy, *gz;\n"
+        "        double falloff, asymptotic;\n"
+        "    };\n"
+        "    const __bc_row __bc_rows[] = {\n"
+    )
+    for var_rhs_name, var_name, deriv_names, falloff, asymptotic in rows:
+        if deriv_names:
+            assert len(deriv_names) == 3, "Not enough entries in the deriv names"
+            gx, gy, gz = deriv_names
+        else:
+            gx, gy, gz = (f"grad_{ii}_{var_name}" for ii in range(3))
+        out += (
+            f"        {{{var_rhs_name}, {var_name}, {gx}, {gy}, {gz},"
+            f" {float(falloff)}, {float(asymptotic)}}},\n"
+        )
+    out += "    };\n"
+    out += "    for (const auto &__r : __bc_rows)\n"
+    out += (
+        f"        {prefix}_bcs(__r.rhs, __r.f, __r.gx, __r.gy, __r.gz,"
+        f" {pmin}, {pmax}, __r.falloff, __r.asymptotic, {sz}, {bflag});\n"
+    )
+    return out
+
+
 def generate_force_sym_matrix_det_to_one(
     vname, unzip_access, uzip="uiVar", node="node", dtype="double"
 ):
