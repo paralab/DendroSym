@@ -1260,6 +1260,37 @@ def gen_var_info(
     return physcon_text
 
 
+def gen_var_struct(
+    member_names: list,
+    enum_var_names: list,
+    struct_name: str = "out",
+    zip_var_name: str = "unzipVarsRHS",
+    offset_name: str = "offset",
+    enum_name: str = "VAR",
+    dtype: str = "double",
+    use_const: bool = False,
+):
+    """Emit a grouped per-block I/O pointer struct.
+
+    Produces `struct { T *a; T *b; } NAME;` followed by
+    `NAME.a = &zip[ENUM::E][offset];` assignments, so generated equation bodies
+    read `NAME.var` -- the per-block pointers are grouped under one name
+    (`in`/`out`) that states each variable's role. Compiles to the same
+    pointers as the flat extraction (zero overhead), just clearer to read/edit.
+    """
+    assert len(member_names) == len(enum_var_names), (
+        "member/enum list sizes do not match"
+    )
+    cq = "const " if use_const else ""
+    out = "    struct {\n"
+    for m in member_names:
+        out += f"        {cq}{dtype} *{m};\n"
+    out += f"    }} {struct_name};\n"
+    for m, e in zip(member_names, enum_var_names):
+        out += f"    {struct_name}.{m} = &{zip_var_name}[{enum_name}::{e}][{offset_name}];\n"
+    return out
+
+
 def gen_var_name_array(
     enum_names: list, project_name: str = "ccz4", list_name_inner: str = "VAR"
 ):

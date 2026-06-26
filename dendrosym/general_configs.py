@@ -303,6 +303,15 @@ class DendroConfiguration:
         # construct cse from the list
         cse_exp = dendrosym.codegen.construct_cse_from_list(all_exp)
 
+        # group output assignment targets under the output struct: alpha_rhs ->
+        # out.alpha, so the generated equations read `out.alpha[pp] = ...`.
+        struct = self.output_struct_name(var_type)
+        if struct is not None:
+            all_rhs_names = [
+                f"{struct}.{n[:-4] if n.endswith('_rhs') else n}"
+                for n in all_rhs_names
+            ]
+
         if arc_type == "cpu":
             main_output_str = dendrosym.codegen.generate_cpu_preextracted(
                 cse_exp, all_rhs_names, self.idx_str, 0
@@ -397,6 +406,14 @@ class DendroConfiguration:
 
         # collect one (rhs, field, grads, falloff, asymptotic) row per variable,
         # then emit a single data-table + loop instead of N unrolled calls.
+        struct = self.output_struct_name(var_type)
+
+        def _out_name(rhs_name):
+            if struct is None:
+                return rhs_name
+            base = rhs_name[:-4] if rhs_name.endswith("_rhs") else rhs_name
+            return f"{struct}.{base}"
+
         rows = []
 
         for ii, the_var in enumerate(all_var_info["vars"]):
@@ -430,7 +447,13 @@ class DendroConfiguration:
                                 raise Exception
 
                     rows.append(
-                        (rhs_var[0], clean_var, grad_vars, falloff, asymptotic)
+                        (
+                            _out_name(rhs_var[0]),
+                            clean_var,
+                            grad_vars,
+                            falloff,
+                            asymptotic,
+                        )
                     )
 
             else:
@@ -439,7 +462,7 @@ class DendroConfiguration:
                 grad_vars = self.create_grad_var_names(cleaned_var_name, "grad", 3)
                 rows.append(
                     (
-                        rhs_var[0],
+                        _out_name(rhs_var[0]),
                         cleaned_var_name[0],
                         grad_vars,
                         var_info[0],
@@ -489,6 +512,15 @@ class DendroConfiguration:
 
         return return_str
 
+    def output_struct_name(self, var_type):
+        """Name of the struct that groups this var_type's output pointers.
+
+        Returns "out" for evolution -> generated RHS reads `out.alpha` instead
+        of a bare `alpha_rhs`, so the kernel states which names are outputs.
+        Returns None for var_types still using the flat extraction.
+        """
+        return "out" if var_type == "evolution" else None
+
     def generate_rhs_var_extraction(
         self,
         var_type="general",
@@ -510,15 +542,27 @@ class DendroConfiguration:
         named_enums = self.get_enum_var_names(var_type)
         vars_use = self.get_rhs_var_names(var_type)
 
-        return_str = dendrosym.codegen.gen_var_info(
+        struct = self.output_struct_name(var_type)
+        if struct is not None:
+            # grouped form: `struct { double *alpha; ... } out;` + assignments,
+            # so equation bodies read `out.alpha`.
+            members = [v[:-4] if v.endswith("_rhs") else v for v in vars_use]
+            return dendrosym.codegen.gen_var_struct(
+                members,
+                named_enums,
+                struct_name=struct,
+                zip_var_name=zip_var_name,
+                dtype=dtype,
+                use_const=use_const,
+            )
+
+        return dendrosym.codegen.gen_var_info(
             vars_use,
             zip_var_name=zip_var_name,
             use_const=use_const,
             dtype=dtype,
             enum_var_names=named_enums,
         )
-
-        return return_str
 
     def gen_enum_code(
         self, var_type: str, enum_start_idx: int = 0, enum_name: str = "VAR"

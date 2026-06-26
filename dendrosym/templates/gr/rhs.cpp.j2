@@ -181,7 +181,7 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
         };
         const __ko_row __ko_rows[] = {
 {% for vname in evolution_var_names %}
-            { {{ vname }}, {{ vname }}_rhs, grad_0_{{ vname }}, grad_1_{{ vname }}, grad_2_{{ vname }} },
+            { {{ vname }}, out.{{ vname }}, grad_0_{{ vname }}, grad_1_{{ vname }}, grad_2_{{ vname }} },
 {% endfor %}
         };
         for (const auto &__r : __ko_rows)
