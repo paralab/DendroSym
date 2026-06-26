@@ -13,6 +13,7 @@
 #include "physcon.h"
 #include "parameters.h"
 #include "profile_params.h"
+#include "block_geometry.h"
 
 using namespace std;
 using namespace {{ namespace }};
@@ -24,41 +25,25 @@ using namespace {{ namespace }};
 void {{ project_name }}Constraints(double **uzipConsVars, const double **uZipVars,
                      const ot::Block *blkList, unsigned int numBlocks) {
 
-    unsigned int offset;
-    double ptmin[3], ptmax[3];
-    unsigned int sz[3];
-    unsigned int bflag;
     const Point pt_min({{ namespace }}::{{ project_upper }}_COMPD_MIN[0],
                        {{ namespace }}::{{ project_upper }}_COMPD_MIN[1],
                        {{ namespace }}::{{ project_upper }}_COMPD_MIN[2]);
     const Point pt_max({{ namespace }}::{{ project_upper }}_COMPD_MAX[0],
                        {{ namespace }}::{{ project_upper }}_COMPD_MAX[1],
                        {{ namespace }}::{{ project_upper }}_COMPD_MAX[2]);
-    const unsigned int PW = {{ namespace }}::{{ project_upper }}_PADDING_WIDTH;
+    const Point oct_min({{ namespace }}::{{ project_upper }}_OCTREE_MIN[0],
+                        {{ namespace }}::{{ project_upper }}_OCTREE_MIN[1],
+                        {{ namespace }}::{{ project_upper }}_OCTREE_MIN[2]);
+    const Point oct_max({{ namespace }}::{{ project_upper }}_OCTREE_MAX[0],
+                        {{ namespace }}::{{ project_upper }}_OCTREE_MAX[1],
+                        {{ namespace }}::{{ project_upper }}_OCTREE_MAX[2]);
 
-    for (unsigned int blk = 0; blk < numBlocks; blk++) {
-        offset = blkList[blk].getOffset();
-        sz[0] = blkList[blk].getAllocationSzX();
-        sz[1] = blkList[blk].getAllocationSzY();
-        sz[2] = blkList[blk].getAllocationSzZ();
-
-        bflag = blkList[blk].getBlkNodeFlag();
-
-        double dx = blkList[blk].computeDx(pt_min, pt_max);
-        double dy = blkList[blk].computeDy(pt_min, pt_max);
-        double dz = blkList[blk].computeDz(pt_min, pt_max);
-
-        ptmin[0] = GRIDX_TO_X(blkList[blk].getBlockNode().minX()) - PW * dx;
-        ptmin[1] = GRIDY_TO_Y(blkList[blk].getBlockNode().minY()) - PW * dy;
-        ptmin[2] = GRIDZ_TO_Z(blkList[blk].getBlockNode().minZ()) - PW * dz;
-
-        ptmax[0] = GRIDX_TO_X(blkList[blk].getBlockNode().maxX()) + PW * dx;
-        ptmax[1] = GRIDY_TO_Y(blkList[blk].getBlockNode().maxY()) + PW * dy;
-        ptmax[2] = GRIDZ_TO_Z(blkList[blk].getBlockNode().maxZ()) + PW * dz;
-
-        {{ project_name }}physcon(uzipConsVars, uZipVars, offset,
-                    ptmin, ptmax, sz, bflag);
-    }
+    // ot::BlockGeometryRange yields per-block offset/sz/bflag/dx/ptmin/ptmax and
+    // hoists the grid->physical scaling out of the per-block loop.
+    for (const auto &b : ot::BlockGeometryRange(blkList, numBlocks, pt_min,
+                                                pt_max, oct_min, oct_max))
+        {{ project_name }}physcon(uzipConsVars, uZipVars, b.offset, b.ptmin,
+                                  b.ptmax, b.sz, b.bflag);
 }
 
 // -------------------------------------------------------------------------
