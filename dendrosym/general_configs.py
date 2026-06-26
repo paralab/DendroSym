@@ -313,8 +313,15 @@ class DendroConfiguration:
             ]
 
         if arc_type == "cpu":
+            # group evolution input reads under `in.` (both evolution + constraint
+            # equations read the evolution fields).
             main_output_str = dendrosym.codegen.generate_cpu_preextracted(
-                cse_exp, all_rhs_names, self.idx_str, 0
+                cse_exp,
+                all_rhs_names,
+                self.idx_str,
+                0,
+                input_names=self.input_var_names(),
+                input_struct=self.input_struct_name(),
             )
 
             output_str += main_output_str
@@ -414,6 +421,11 @@ class DendroConfiguration:
             base = rhs_name[:-4] if rhs_name.endswith("_rhs") else rhs_name
             return f"{struct}.{base}"
 
+        in_struct = self.input_struct_name()
+
+        def _in_name(field):
+            return f"{in_struct}.{field}" if in_struct else field
+
         rows = []
 
         for ii, the_var in enumerate(all_var_info["vars"]):
@@ -449,7 +461,7 @@ class DendroConfiguration:
                     rows.append(
                         (
                             _out_name(rhs_var[0]),
-                            clean_var,
+                            _in_name(clean_var),
                             grad_vars,
                             falloff,
                             asymptotic,
@@ -463,7 +475,7 @@ class DendroConfiguration:
                 rows.append(
                     (
                         _out_name(rhs_var[0]),
-                        cleaned_var_name[0],
+                        _in_name(cleaned_var_name[0]),
                         grad_vars,
                         var_info[0],
                         var_info[1],
@@ -501,6 +513,19 @@ class DendroConfiguration:
         else:
             raise NotImplementedError("Not Yet Implemented")
 
+        if var_type == "evolution":
+            # grouped form: `struct { const double *alpha; ... } in;` so equation
+            # bodies read `in.alpha`.
+            return dendrosym.codegen.gen_var_struct(
+                self.all_var_names.get(var_type, []),
+                named_enums,
+                struct_name=self.input_struct_name(),
+                zip_var_name=zip_var_name,
+                enum_name=enum_name,
+                dtype=dtype,
+                use_const=use_const,
+            )
+
         return_str = dendrosym.codegen.gen_var_info(
             self.all_var_names.get(var_type, []),
             zip_var_name=zip_var_name,
@@ -520,6 +545,19 @@ class DendroConfiguration:
         Returns None for var_types still using the flat extraction.
         """
         return "out" if var_type == "evolution" else None
+
+    def input_struct_name(self):
+        """Struct grouping the evolution input pointers (`in.alpha`).
+
+        Applied wherever equations READ the evolution fields -- both the
+        evolution RHS and the constraint kernel do -- so it's keyed on the
+        evolution input set, not the var_type currently being generated.
+        """
+        return "in"
+
+    def input_var_names(self):
+        """The closed, enumerated set of evolution input field names."""
+        return list(self.all_var_names.get("evolution", []))
 
     def generate_rhs_var_extraction(
         self,

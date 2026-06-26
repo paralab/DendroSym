@@ -220,6 +220,8 @@ def generate_cpu_preextracted(
     dtype="double",
     use_const=False,
     return_stats=False,
+    input_names=None,
+    input_struct=None,
 ):
     custom_functions = {
         "grad": "grad",
@@ -259,6 +261,8 @@ def generate_cpu_preextracted(
 
     output_str += "// Dendro: END MAIN VARIABLES\n\n"
     output_str = change_deriv_names(output_str)
+    if input_struct and input_names:
+        output_str = apply_input_struct(output_str, input_names, input_struct)
 
     if not return_stats:
         output_str += "// Dendro: }}}} End Code Generation \n"
@@ -367,6 +371,27 @@ def change_deriv_names(in_str: str) -> str:
     out = _DERIV1_PAT.sub(_deriv1_repl, in_str)
     out = _DERIV2_PAT.sub(_deriv2_repl, out)
     return out
+
+
+def apply_input_struct(code: str, input_names: list, struct: str) -> str:
+    """Prefix bare input-variable reads `v` -> `struct.v` (e.g. `in.alpha`).
+
+    Matches each field name as a whole token not preceded by a word char or '.'
+    -- so it skips `grad_0_v`/`agrad_0_v` derivative buffers (preceded by '_')
+    and `out.v` output writes (preceded by '.') -- and bounded by `\\b`, so both
+    `v[pp]` value reads in the equations and bare `v` pointer args in the
+    deriv-calc are caught. Keyed on the closed, enumerated input set, so the
+    matches are exact. Must run AFTER the deriv-name rewrite.
+    """
+    if not input_names or not struct:
+        return code
+    for v in input_names:
+        code = regex.sub(
+            rf"(?<![\w.]){regex.escape(v)}\b",
+            f"{struct}.{v}",
+            code,
+        )
+    return code
 
 
 def generate_fpcore(ex, vnames, idx):

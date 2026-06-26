@@ -83,7 +83,7 @@ def _rewrite_deriv_calls(code: str, deriv_obj: str,
 
 # bump when the gencode pipeline changes in a way that invalidates old caches
 # (e.g. changing the printer, CSE settings, .cpp.inc layout, or bcs/ko emission)
-_CACHE_SCHEMA_VERSION = "v3"
+_CACHE_SCHEMA_VERSION = "v5"
 
 
 def _vt_worker_init(inner_workers):
@@ -194,6 +194,14 @@ def _run_var_type(args):
             deriv_calc, deriv_obj_name, use_advective=use_advective
         )
 
+    # group the input field being differentiated under `in.` (grad_x(grad_0_X,
+    # X, ...) -> grad_x(grad_0_X, in.X, ...)); deriv buffers stay bare.
+    _in_struct = config.input_struct_name()
+    _in_names = config.input_var_names()
+    deriv_calc = dendrosym.codegen.apply_input_struct(
+        deriv_calc, _in_names, _in_struct
+    )
+
     (gencode_dir / alloc_file).write_text(deriv_alloc)
     (gencode_dir / calc_file).write_text(deriv_calc)
     (gencode_dir / dealloc_file).write_text(deriv_dealloc)
@@ -208,6 +216,11 @@ def _run_var_type(args):
     except Exception:
         intermediate_str = ""
         dealloc_intermediate_str = ""
+
+    # intermediate derivs read input fields too -> group under `in.`
+    intermediate_str = dendrosym.codegen.apply_input_struct(
+        intermediate_str, _in_names, _in_struct
+    )
 
     intermediate_file = f"{prefix}_{vt}_intermediate_grad.cpp.inc"
     intermediate_dealloc_file = f"{prefix}_{vt}_intermediate_grad_dealloc.cpp.inc"
