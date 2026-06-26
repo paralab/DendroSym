@@ -540,11 +540,11 @@ class DendroConfiguration:
     def output_struct_name(self, var_type):
         """Name of the struct that groups this var_type's output pointers.
 
-        Returns "out" for evolution -> generated RHS reads `out.alpha` instead
-        of a bare `alpha_rhs`, so the kernel states which names are outputs.
-        Returns None for var_types still using the flat extraction.
+        Returns "out" for evolution/constraint -> generated RHS reads
+        `out.alpha` instead of a bare `alpha_rhs`, so the kernel states which
+        names are outputs. Returns None for var_types using the flat extraction.
         """
-        return "out" if var_type == "evolution" else None
+        return "out" if var_type in ("evolution", "constraint") else None
 
     def input_struct_name(self):
         """Struct grouping the evolution input pointers (`in.alpha`).

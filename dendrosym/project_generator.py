@@ -83,7 +83,7 @@ def _rewrite_deriv_calls(code: str, deriv_obj: str,
 
 # bump when the gencode pipeline changes in a way that invalidates old caches
 # (e.g. changing the printer, CSE settings, .cpp.inc layout, or bcs/ko emission)
-_CACHE_SCHEMA_VERSION = "v5"
+_CACHE_SCHEMA_VERSION = "v6"
 
 
 def _vt_worker_init(inner_workers):
@@ -380,18 +380,32 @@ class DendroProjectGenerator:
                 vt, zip_var_name="unzipVarsRHS"
             )
 
-            # For constraint output in physcon, use a different zip var name
+            # For constraint output in physcon: different array (unzipConsVars)
+            # and enum (VAR_CONSTRAINT); group under `out` to match evolution.
             if vt == "constraint":
-                # need to use the right enum name for constraints
                 named_enums_c = c.get_enum_var_names(vt)
                 rhs_names_c = c.get_rhs_var_names(vt)
-                ctx[f"{vt}_output_extraction"] = dendrosym.codegen.gen_var_info(
-                    rhs_names_c,
-                    zip_var_name="unzipConsVars",
-                    use_const=False,
-                    enum_name="VAR_CONSTRAINT",
-                    enum_var_names=named_enums_c,
-                )
+                struct_c = c.output_struct_name(vt)
+                if struct_c is not None:
+                    members_c = [
+                        n[:-4] if n.endswith("_rhs") else n for n in rhs_names_c
+                    ]
+                    ctx[f"{vt}_output_extraction"] = dendrosym.codegen.gen_var_struct(
+                        members_c,
+                        named_enums_c,
+                        struct_name=struct_c,
+                        zip_var_name="unzipConsVars",
+                        enum_name="VAR_CONSTRAINT",
+                        use_const=False,
+                    )
+                else:
+                    ctx[f"{vt}_output_extraction"] = dendrosym.codegen.gen_var_info(
+                        rhs_names_c,
+                        zip_var_name="unzipConsVars",
+                        use_const=False,
+                        enum_name="VAR_CONSTRAINT",
+                        enum_var_names=named_enums_c,
+                    )
 
         # -- parameter extraction code (per param-subtype like evolution, constraint)
         for param_subtype in c.all_vars.get("parameter", {}):
