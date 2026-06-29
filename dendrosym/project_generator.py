@@ -83,7 +83,7 @@ def _rewrite_deriv_calls(code: str, deriv_obj: str,
 
 # bump when the gencode pipeline changes in a way that invalidates old caches
 # (e.g. changing the printer, CSE settings, .cpp.inc layout, or bcs/ko emission)
-_CACHE_SCHEMA_VERSION = "v8"
+_CACHE_SCHEMA_VERSION = "v9"
 
 
 def _vt_worker_init(inner_workers):
@@ -145,6 +145,7 @@ def _try_cache_hit(vt, vt_hash, gencode_dir, prefix):
         f"{vt}_bcs_code": meta.get("bcs_code", ""),
         f"{vt}_ko_code": meta.get("ko_code", ""),
         f"{vt}_deriv_struct_name": meta.get("deriv_struct_name", ""),
+        f"{vt}_num_derivs": meta.get("num_derivs", 0),
     }
 
 
@@ -162,6 +163,7 @@ def _save_cache(vt, vt_hash, gencode_dir, ctx_update):
         "bcs_code": ctx_update.get(f"{vt}_bcs_code", ""),
         "ko_code": ctx_update.get(f"{vt}_ko_code", ""),
         "deriv_struct_name": ctx_update.get(f"{vt}_deriv_struct_name", ""),
+        "num_derivs": ctx_update.get(f"{vt}_num_derivs", 0),
     }
     (cache_root / "meta.json").write_text(json.dumps(meta))
 
@@ -222,6 +224,9 @@ def _run_var_type(args):
     struct_file = f"{prefix}_{vt}_deriv_struct.cpp.inc"
     (gencode_dir / struct_file).write_text(deriv_struct)
     deriv_calc = dendrosym.codegen.apply_deriv_struct(deriv_calc)
+
+    # buffer count for this var_type -> sizes NUM_DERIVATIVES (max over vts)
+    num_derivs = dendrosym.codegen.count_deriv_buffers(deriv_alloc)
 
     (gencode_dir / alloc_file).write_text(deriv_alloc)
     (gencode_dir / calc_file).write_text(deriv_calc)
@@ -287,6 +292,7 @@ def _run_var_type(args):
             "rhs_eqns": rhs_file,
         },
         f"{vt}_deriv_struct_name": deriv_struct_name,
+        f"{vt}_num_derivs": num_derivs,
         f"{vt}_bcs_code": bcs_code,
         f"{vt}_ko_code": ko_code,
     }
@@ -726,6 +732,15 @@ class DendroProjectGenerator:
         for vt, result in zip(miss_vts, results):
             ctx.update(result)
             _save_cache(vt, vt_hashes[vt], gencode_dir, result)
+
+        # size NUM_DERIVATIVES from the largest per-var_type workspace (replaces
+        # the hand-set magic number); 0 (no buffers) leaves the template default.
+        deriv_counts = [
+            ctx.get(f"{vt}_num_derivs", 0) for vt in active_vts
+        ]
+        max_derivs = max(deriv_counts, default=0)
+        if max_derivs > 0:
+            ctx["num_derivatives"] = max_derivs
 
         # -- evolution constraints (deferred from _build_context)
         if hasattr(c, "generate_evolution_constraints"):

@@ -440,6 +440,23 @@ def gen_deriv_struct(memalloc_code: str, struct_name: str) -> str:
     return out
 
 
+def count_deriv_buffers(memalloc_code: str) -> int:
+    """Count the `T *NAME = deriv_base + k*BLK_SZ;` buffers in a memalloc carve.
+
+    Same line shape `gen_deriv_struct` parses into members, so this equals the
+    struct's `count()`. Used to size NUM_DERIVATIVES from the (deduped) workspace
+    instead of the hand-set magic number.
+    """
+    n = 0
+    for line in memalloc_code.splitlines():
+        if regex.match(
+            r"\s*\w[\w ]*\*\s*(\w+)\s*=\s*(deriv_base\s*\+\s*\d+\s*\*\s*BLK_SZ);",
+            line,
+        ):
+            n += 1
+    return n
+
+
 def fold_agrad_to_grad(code: str) -> str:
     """Rewrite advective deriv buffers to the regular ones: agrad_i_X -> grad_i_X.
 
