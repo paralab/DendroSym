@@ -83,7 +83,7 @@ def _rewrite_deriv_calls(code: str, deriv_obj: str,
 
 # bump when the gencode pipeline changes in a way that invalidates old caches
 # (e.g. changing the printer, CSE settings, .cpp.inc layout, or bcs/ko emission)
-_CACHE_SCHEMA_VERSION = "v7"
+_CACHE_SCHEMA_VERSION = "v8"
 
 
 def _vt_worker_init(inner_workers):
@@ -144,6 +144,7 @@ def _try_cache_hit(vt, vt_hash, gencode_dir, prefix):
         f"{vt}_gencode": gencode_filenames,
         f"{vt}_bcs_code": meta.get("bcs_code", ""),
         f"{vt}_ko_code": meta.get("ko_code", ""),
+        f"{vt}_deriv_struct_name": meta.get("deriv_struct_name", ""),
     }
 
 
@@ -160,6 +161,7 @@ def _save_cache(vt, vt_hash, gencode_dir, ctx_update):
         "gencode": gencode_filenames,
         "bcs_code": ctx_update.get(f"{vt}_bcs_code", ""),
         "ko_code": ctx_update.get(f"{vt}_ko_code", ""),
+        "deriv_struct_name": ctx_update.get(f"{vt}_deriv_struct_name", ""),
     }
     (cache_root / "meta.json").write_text(json.dumps(meta))
 
@@ -213,6 +215,14 @@ def _run_var_type(args):
             dendrosym.codegen.fold_agrad_to_grad(deriv_calc)
         )
 
+    # build the derivative-workspace struct from the (deduped) carve, and point
+    # the deriv-calc at `d.<buffer>` instead of the bare buffer name.
+    deriv_struct_name = f"{prefix}_{vt}_derivs_t"
+    deriv_struct = dendrosym.codegen.gen_deriv_struct(deriv_alloc, deriv_struct_name)
+    struct_file = f"{prefix}_{vt}_deriv_struct.cpp.inc"
+    (gencode_dir / struct_file).write_text(deriv_struct)
+    deriv_calc = dendrosym.codegen.apply_deriv_struct(deriv_calc)
+
     (gencode_dir / alloc_file).write_text(deriv_alloc)
     (gencode_dir / calc_file).write_text(deriv_calc)
     (gencode_dir / dealloc_file).write_text(deriv_dealloc)
@@ -245,12 +255,16 @@ def _run_var_type(args):
     if not use_advective:
         # equations read agrad_i_X -> point them at the folded grad_i_X buffer
         rhs_code = dendrosym.codegen.fold_agrad_to_grad(rhs_code)
+    # equations read the standard deriv buffers -> d.<buffer> (struct workspace)
+    rhs_code = dendrosym.codegen.apply_deriv_struct(rhs_code)
     rhs_file = f"{prefix}_{vt}_rhs_eqns.cpp.inc"
     (gencode_dir / rhs_file).write_text(rhs_code)
 
     print(f"    generating BCS code...", file=sys.stderr)
     try:
         bcs_code = config.generate_bcs_calculations(vt)
+        # the BC table reads the deriv buffers -> d.<buffer>
+        bcs_code = dendrosym.codegen.apply_deriv_struct(bcs_code)
     except Exception:
         bcs_code = ""
 
@@ -267,10 +281,12 @@ def _run_var_type(args):
             "deriv_alloc": alloc_file,
             "deriv_calc": calc_file,
             "deriv_dealloc": dealloc_file,
+            "deriv_struct": struct_file,
             "intermediate_grad": intermediate_file,
             "intermediate_grad_dealloc": intermediate_dealloc_file,
             "rhs_eqns": rhs_file,
         },
+        f"{vt}_deriv_struct_name": deriv_struct_name,
         f"{vt}_bcs_code": bcs_code,
         f"{vt}_ko_code": ko_code,
     }

@@ -50,6 +50,11 @@ void {{ project_name }}Constraints(double **uzipConsVars, const double **uZipVar
 // per-block constraint computation
 // -------------------------------------------------------------------------
 
+// derivative-workspace struct (grouped buffers + self-sizing bind/count)
+{% if constraint_gencode is defined and constraint_gencode.deriv_struct is defined %}
+#include "../gencode/{{ constraint_gencode.deriv_struct }}"
+{% endif %}
+
 void {{ project_name }}physcon(double **unzipConsVars, const double **uZipVars,
                  const unsigned int &offset, const double *pmin,
                  const double *pmax, const unsigned int *sz,
@@ -91,8 +96,9 @@ void {{ project_name }}physcon(double **unzipConsVars, const double **uZipVars,
 #include "../gencode/{{ constraint_gencode.intermediate_grad }}"
 {% endif %}
 
-{% if constraint_gencode is defined and constraint_gencode.deriv_alloc is defined %}
-#include "../gencode/{{ constraint_gencode.deriv_alloc }}"
+{% if constraint_gencode is defined and constraint_gencode.deriv_calc is defined %}
+    {{ constraint_deriv_struct_name }} d;
+    d.bind(deriv_base, BLK_SZ);
 #include "../gencode/{{ constraint_gencode.deriv_calc }}"
 {% endif %}
 

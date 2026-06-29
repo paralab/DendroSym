@@ -394,6 +394,52 @@ def apply_input_struct(code: str, input_names: list, struct: str) -> str:
     return code
 
 
+# derivative-buffer tokens: grad_0_X, grad2_0_1_X (agrad already folded to grad).
+# the digit after the prefix keeps it from matching the grad_x/grad_xy *methods*.
+_DERIV_BUF_PAT = r"(grad2_\d+_\d+_\w+|grad_\d+_\w+)"
+
+
+def apply_deriv_struct(code: str, struct: str = "d") -> str:
+    """Prefix derivative-buffer reads `grad_0_X` -> `struct.grad_0_X` (`d.`).
+
+    Same lookbehind guard as the input pass: skips an already-prefixed
+    `d.grad_0_X` and never matches the `grad_x(`/`grad_xy(` method names (no
+    digit after the prefix). Apply to the deriv-calc/equations/KO/BC, NOT the
+    struct definition (whose members are the bare names).
+    """
+    if not struct:
+        return code
+    return regex.sub(rf"(?<![\w.]){_DERIV_BUF_PAT}", rf"{struct}.\1", code)
+
+
+def gen_deriv_struct(memalloc_code: str, struct_name: str) -> str:
+    """Build a derivative-workspace struct from the memalloc carve.
+
+    Parses `T *NAME = deriv_base + k*BLK_SZ;` lines into a struct holding the
+    pointer members, a `count()` (auto -- replaces the hand-set NUM_DERIVATIVES),
+    and a `bind()` that performs the carve. The kernel then reads `d.NAME`.
+    """
+    members, binds = [], []
+    for line in memalloc_code.splitlines():
+        m = regex.match(
+            r"\s*\w[\w ]*\*\s*(\w+)\s*=\s*(deriv_base\s*\+\s*\d+\s*\*\s*BLK_SZ);",
+            line,
+        )
+        if m:
+            members.append(m.group(1))
+            binds.append((m.group(1), m.group(2)))
+    out = f"// derivative workspace -- grouped + self-sizing (see d.bind/d.count)\n"
+    out += f"struct {struct_name} {{\n"
+    for name in members:
+        out += f"    double *{name};\n"
+    out += f"    static constexpr unsigned int count() {{ return {len(members)}; }}\n"
+    out += "    void bind(double *deriv_base, unsigned int BLK_SZ) {\n"
+    for name, expr in binds:
+        out += f"        {name} = {expr};\n"
+    out += "    }\n};\n"
+    return out
+
+
 def fold_agrad_to_grad(code: str) -> str:
     """Rewrite advective deriv buffers to the regular ones: agrad_i_X -> grad_i_X.
 
