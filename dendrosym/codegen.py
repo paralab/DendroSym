@@ -394,6 +394,62 @@ def apply_input_struct(code: str, input_names: list, struct: str) -> str:
     return code
 
 
+def fold_agrad_to_grad(code: str) -> str:
+    """Rewrite advective deriv buffers to the regular ones: agrad_i_X -> grad_i_X.
+
+    Used when advection is disabled (use_advective=False): the call rewrite
+    already computes agrad buffers with the centered stencil, making them
+    bit-identical to grad_i_X. Folding the names lets the duplicate buffers be
+    deduped away. Leaves grad2_/grad_/kograd_ tokens untouched.
+    """
+    return regex.sub(r"\bagrad_(\d+)_", r"grad_\1_", code)
+
+
+def dedup_deriv_alloc(code: str) -> str:
+    """Drop duplicate `T *NAME = deriv_base + k*BLK_SZ;` lines and renumber.
+
+    After agrad->grad folding the workspace carve has repeated buffer names;
+    keep the first of each and recompact offsets 0..N-1 so the workspace shrinks
+    by exactly the number of folded duplicates.
+    """
+    seen = set()
+    out, k = [], 0
+    for line in code.splitlines():
+        m = regex.match(
+            r"\s*(\w[\w ]*\*)\s*(\w+)\s*=\s*deriv_base\s*\+\s*\d+\s*\*\s*BLK_SZ;",
+            line,
+        )
+        if m:
+            name = m.group(2)
+            if name in seen:
+                continue
+            seen.add(name)
+            out.append(f"{m.group(1).strip()} {name} = deriv_base + {k} * BLK_SZ;")
+            k += 1
+        else:
+            out.append(line)
+    tail = "\n" if code.endswith("\n") else ""
+    return "\n".join(out) + tail
+
+
+def dedup_lines(code: str) -> str:
+    """Remove exact-duplicate non-empty lines (keep first occurrence).
+
+    For the deriv-calc after agrad->grad folding: the folded advective calls
+    become byte-identical to the regular ones, so the second is redundant.
+    """
+    seen, out = set(), []
+    for line in code.splitlines():
+        s = line.strip()
+        if s and s in seen:
+            continue
+        if s:
+            seen.add(s)
+        out.append(line)
+    tail = "\n" if code.endswith("\n") else ""
+    return "\n".join(out) + tail
+
+
 def generate_fpcore(ex, vnames, idx):
     """Gennerate FPCore code
 

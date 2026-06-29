@@ -83,7 +83,7 @@ def _rewrite_deriv_calls(code: str, deriv_obj: str,
 
 # bump when the gencode pipeline changes in a way that invalidates old caches
 # (e.g. changing the printer, CSE settings, .cpp.inc layout, or bcs/ko emission)
-_CACHE_SCHEMA_VERSION = "v6"
+_CACHE_SCHEMA_VERSION = "v7"
 
 
 def _vt_worker_init(inner_workers):
@@ -202,6 +202,17 @@ def _run_var_type(args):
         deriv_calc, _in_names, _in_struct
     )
 
+    # advection off: agrad buffers are computed with the centered stencil, so
+    # they duplicate grad_i_X exactly. Fold the names and dedup the workspace +
+    # calc so the duplicates (and their redundant stencil calls) disappear.
+    if not use_advective:
+        deriv_alloc = dendrosym.codegen.dedup_deriv_alloc(
+            dendrosym.codegen.fold_agrad_to_grad(deriv_alloc)
+        )
+        deriv_calc = dendrosym.codegen.dedup_lines(
+            dendrosym.codegen.fold_agrad_to_grad(deriv_calc)
+        )
+
     (gencode_dir / alloc_file).write_text(deriv_alloc)
     (gencode_dir / calc_file).write_text(deriv_calc)
     (gencode_dir / dealloc_file).write_text(deriv_dealloc)
@@ -221,6 +232,8 @@ def _run_var_type(args):
     intermediate_str = dendrosym.codegen.apply_input_struct(
         intermediate_str, _in_names, _in_struct
     )
+    if not use_advective:
+        intermediate_str = dendrosym.codegen.fold_agrad_to_grad(intermediate_str)
 
     intermediate_file = f"{prefix}_{vt}_intermediate_grad.cpp.inc"
     intermediate_dealloc_file = f"{prefix}_{vt}_intermediate_grad_dealloc.cpp.inc"
@@ -229,6 +242,9 @@ def _run_var_type(args):
 
     print(f"    generating RHS equations...", file=sys.stderr)
     rhs_code = config.generate_rhs_code(vt)
+    if not use_advective:
+        # equations read agrad_i_X -> point them at the folded grad_i_X buffer
+        rhs_code = dendrosym.codegen.fold_agrad_to_grad(rhs_code)
     rhs_file = f"{prefix}_{vt}_rhs_eqns.cpp.inc"
     (gencode_dir / rhs_file).write_text(rhs_code)
 
