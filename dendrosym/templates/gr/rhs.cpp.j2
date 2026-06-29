@@ -106,7 +106,7 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
     const unsigned int bytes = n * sizeof(double);
 
     // derivative workspace -- one big allocation that holds all precomputed
-    // derivative arrays. each grad_0_alpha etc. is a pointer at offset N*BLK_SZ.
+    // derivative arrays. each alpha_x etc. is a pointer at offset N*BLK_SZ.
     double *const deriv_base = {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE;
 
 {% if use_dendro_derivs %}
@@ -123,7 +123,7 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
 {% endif %}
 
     // -- standard derivative computation --
-    // d.bind() carves the workspace into named buffers (d.grad_0_alpha, ...);
+    // d.bind() carves the workspace into named buffers (d.alpha_x, d.alpha_xy, ...);
     // deriv_calc fills them with the finite-difference stencils.
 {% if evolution_gencode is defined and evolution_gencode.deriv_calc is defined %}
     {{ evolution_deriv_struct_name }} d;
@@ -187,7 +187,7 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
         };
         const __ko_row __ko_rows[] = {
 {% for vname in evolution_var_names %}
-            { in.{{ vname }}, out.{{ vname }}, d.grad_0_{{ vname }}, d.grad_1_{{ vname }}, d.grad_2_{{ vname }} },
+            { in.{{ vname }}, out.{{ vname }}, d.{{ vname }}_x, d.{{ vname }}_y, d.{{ vname }}_z },
 {% endfor %}
         };
         for (const auto &__r : __ko_rows)

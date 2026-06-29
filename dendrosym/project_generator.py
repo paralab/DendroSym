@@ -83,7 +83,7 @@ def _rewrite_deriv_calls(code: str, deriv_obj: str,
 
 # bump when the gencode pipeline changes in a way that invalidates old caches
 # (e.g. changing the printer, CSE settings, .cpp.inc layout, or bcs/ko emission)
-_CACHE_SCHEMA_VERSION = "v9"
+_CACHE_SCHEMA_VERSION = "v10"
 
 
 def _vt_worker_init(inner_workers):
@@ -217,13 +217,25 @@ def _run_var_type(args):
             dendrosym.codegen.fold_agrad_to_grad(deriv_calc)
         )
 
-    # build the derivative-workspace struct from the (deduped) carve, and point
-    # the deriv-calc at `d.<buffer>` instead of the bare buffer name.
+    # rename canonical buffer tokens to operator form (grad_0_chi -> chi_x,
+    # grad2_0_1_chi -> chi_xy, agrad -> adv_chi_x). Keyed on the input field
+    # set so the operator names (grad_x/deriv_x) and bare reads are untouched.
+    # Runs on BOTH the carve and the calc so the struct members and the
+    # references stay in lock-step.
+    deriv_alloc = dendrosym.codegen.rename_deriv_buffers(
+        deriv_alloc, _in_names, use_advective
+    )
+    deriv_calc = dendrosym.codegen.rename_deriv_buffers(
+        deriv_calc, _in_names, use_advective
+    )
+
+    # build the derivative-workspace struct from the (deduped, renamed) carve,
+    # and point the deriv-calc at `d.<buffer>` instead of the bare buffer name.
     deriv_struct_name = f"{prefix}_{vt}_derivs_t"
     deriv_struct = dendrosym.codegen.gen_deriv_struct(deriv_alloc, deriv_struct_name)
     struct_file = f"{prefix}_{vt}_deriv_struct.cpp.inc"
     (gencode_dir / struct_file).write_text(deriv_struct)
-    deriv_calc = dendrosym.codegen.apply_deriv_struct(deriv_calc)
+    deriv_calc = dendrosym.codegen.apply_deriv_struct(deriv_calc, _in_names)
 
     # buffer count for this var_type -> sizes NUM_DERIVATIVES (max over vts)
     num_derivs = dendrosym.codegen.count_deriv_buffers(deriv_alloc)
@@ -249,6 +261,9 @@ def _run_var_type(args):
     )
     if not use_advective:
         intermediate_str = dendrosym.codegen.fold_agrad_to_grad(intermediate_str)
+    intermediate_str = dendrosym.codegen.rename_deriv_buffers(
+        intermediate_str, _in_names, use_advective
+    )
 
     intermediate_file = f"{prefix}_{vt}_intermediate_grad.cpp.inc"
     intermediate_dealloc_file = f"{prefix}_{vt}_intermediate_grad_dealloc.cpp.inc"
@@ -260,16 +275,22 @@ def _run_var_type(args):
     if not use_advective:
         # equations read agrad_i_X -> point them at the folded grad_i_X buffer
         rhs_code = dendrosym.codegen.fold_agrad_to_grad(rhs_code)
-    # equations read the standard deriv buffers -> d.<buffer> (struct workspace)
-    rhs_code = dendrosym.codegen.apply_deriv_struct(rhs_code)
+    # equations read the standard deriv buffers -> operator form -> d.<buffer>
+    rhs_code = dendrosym.codegen.rename_deriv_buffers(
+        rhs_code, _in_names, use_advective
+    )
+    rhs_code = dendrosym.codegen.apply_deriv_struct(rhs_code, _in_names)
     rhs_file = f"{prefix}_{vt}_rhs_eqns.cpp.inc"
     (gencode_dir / rhs_file).write_text(rhs_code)
 
     print(f"    generating BCS code...", file=sys.stderr)
     try:
         bcs_code = config.generate_bcs_calculations(vt)
-        # the BC table reads the deriv buffers -> d.<buffer>
-        bcs_code = dendrosym.codegen.apply_deriv_struct(bcs_code)
+        # the BC table reads the deriv buffers -> operator form -> d.<buffer>
+        bcs_code = dendrosym.codegen.rename_deriv_buffers(
+            bcs_code, _in_names, use_advective
+        )
+        bcs_code = dendrosym.codegen.apply_deriv_struct(bcs_code, _in_names)
     except Exception:
         bcs_code = ""
 

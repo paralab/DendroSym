@@ -396,20 +396,77 @@ def apply_input_struct(code: str, input_names: list, struct: str) -> str:
 
 # derivative-buffer tokens: grad_0_X, grad2_0_1_X (agrad already folded to grad).
 # the digit after the prefix keeps it from matching the grad_x/grad_xy *methods*.
+# Fallback shape, used only when no enumerated field set is supplied.
 _DERIV_BUF_PAT = r"(grad2_\d+_\d+_\w+|grad_\d+_\w+)"
 
+# direction-index -> axis letter, shared by the rename + the operator-name parse.
+_DIR_AXIS = {"0": "x", "1": "y", "2": "z"}
 
-def apply_deriv_struct(code: str, struct: str = "d") -> str:
-    """Prefix derivative-buffer reads `grad_0_X` -> `struct.grad_0_X` (`d.`).
+# second-order axis pairs, longest-first so `xx` wins over `x` without relying
+# on alternation backtracking; first-order axes follow.
+_AXIS_SUFFIX = r"(?:xx|xy|xz|yy|yz|zz|x|y|z)"
 
-    Same lookbehind guard as the input pass: skips an already-prefixed
-    `d.grad_0_X` and never matches the `grad_x(`/`grad_xy(` method names (no
-    digit after the prefix). Apply to the deriv-calc/equations/KO/BC, NOT the
-    struct definition (whose members are the bare names).
+
+def _fields_alt(field_names) -> str:
+    """Regex alternation of the field names, longest-first so e.g. `Gammahat0`
+    wins over a shorter field that is a prefix of it."""
+    return "|".join(
+        regex.escape(f) for f in sorted(field_names, key=len, reverse=True)
+    )
+
+
+def rename_deriv_buffers(code: str, field_names, use_advective: bool = False) -> str:
+    """Rename canonical deriv-buffer tokens to operator form, keyed on fields.
+
+    `grad_{i}_X -> X_{axis}`, `grad2_{i}_{j}_X -> X_{axis}{axis}`,
+    `agrad_{i}_X -> adv_X_{axis}` (the advective form only survives when
+    advection is on; otherwise the buffers were already folded to `grad_`).
+    So `grad_0_chi -> chi_x`, `grad2_0_1_chi -> chi_xy`, `agrad_0_chi -> adv_chi_x`.
+
+    Keyed on the closed, enumerated field set so the match is exact (the bare
+    field reads `in.X` and the `grad_x(`/`deriv_x(` operator names are never
+    touched). Applies to every emitted string -- the workspace carve, the
+    deriv-calc, the equations, KO and BC -- so all references stay in lock-step.
+    """
+    if not field_names:
+        return code
+    fields = _fields_alt(field_names)
+    # grad2 first: its tokens contain no literal `grad_` substring, but order it
+    # ahead anyway so the intent is clear.
+    code = regex.sub(
+        rf"(?<![\w.])grad2_([012])_([012])_({fields})\b",
+        lambda m: f"{m.group(3)}_{_DIR_AXIS[m.group(1)]}{_DIR_AXIS[m.group(2)]}",
+        code,
+    )
+    code = regex.sub(
+        rf"(?<![\w.])grad_([012])_({fields})\b",
+        lambda m: f"{m.group(2)}_{_DIR_AXIS[m.group(1)]}",
+        code,
+    )
+    code = regex.sub(
+        rf"(?<![\w.])agrad_([012])_({fields})\b",
+        lambda m: f"adv_{m.group(2)}_{_DIR_AXIS[m.group(1)]}",
+        code,
+    )
+    return code
+
+
+def apply_deriv_struct(code: str, field_names=None, struct: str = "d") -> str:
+    """Prefix derivative-buffer reads `chi_x` -> `struct.chi_x` (`d.`).
+
+    Run AFTER `rename_deriv_buffers`, so the buffers are in operator form. Keyed
+    on the enumerated field set + the closed axis-suffix set, the lookbehind
+    skips an already-prefixed `d.chi_x` and the bare/`in.`-grouped field reads.
+    Apply to the deriv-calc/equations/KO/BC, NOT the struct definition (whose
+    members are the bare names). With no field set, falls back to the canonical
+    `grad_*` token shape (pre-rename behaviour).
     """
     if not struct:
         return code
-    return regex.sub(rf"(?<![\w.]){_DERIV_BUF_PAT}", rf"{struct}.\1", code)
+    if not field_names:
+        return regex.sub(rf"(?<![\w.]){_DERIV_BUF_PAT}", rf"{struct}.\1", code)
+    pat = rf"((?:adv_)?(?:{_fields_alt(field_names)})_{_AXIS_SUFFIX})"
+    return regex.sub(rf"(?<![\w.]){pat}\b", rf"{struct}.\1", code)
 
 
 def gen_deriv_struct(memalloc_code: str, struct_name: str) -> str:
