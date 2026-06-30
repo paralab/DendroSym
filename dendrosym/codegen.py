@@ -497,6 +497,74 @@ def gen_deriv_struct(memalloc_code: str, struct_name: str) -> str:
     return out
 
 
+# one deriv-calc call: OBJ.grad_<axis>(d.<dst>, <in.X|d.Y>, h<axis>, sz, bflag);
+_DERIV_CALL_PAT = regex.compile(
+    r"^\s*(\w+)\.grad_(xx|yy|zz|x|y|z)\("
+    r"(d\.\w+),\s*((?:in|d)\.\w+),\s*(h[xyz]),\s*sz,\s*bflag\);\s*$"
+)
+
+
+def group_deriv_calc(calc: str) -> str:
+    """Regroup the deriv-calc into per-axis first-derivative tables + a second
+    block, so the first-order pass is one array drop per axis (the seam a batched
+    engine call slots into -- see the commented `grad_*_batch` line).
+
+    Discriminates by source: `grad_x/y/z` reading an `in.X` field is a first
+    derivative (bucketed by axis); everything else -- pure seconds `grad_xx`
+    (read `in.X`) and mixed seconds `grad_y(.., d.X_x)` (read a first-order
+    buffer) -- is emitted verbatim AFTER all first derivatives, so the mixed
+    ones still see their dependency. Reordering independent first derivatives
+    among themselves is bit-identical (distinct buffers, no aliasing).
+
+    Bails (returns `calc` unchanged) unless every non-blank line is a recognized
+    deriv call, so a solver with intermediate/staged lines is left untouched.
+    """
+    lines = [ln for ln in calc.splitlines() if ln.strip()]
+    if not lines:
+        return calc
+    obj = None
+    buckets = {"x": [], "y": [], "z": []}  # axis -> [(dst, src), ...]
+    seconds = []  # verbatim second-derivative lines, original order
+    for ln in lines:
+        m = _DERIV_CALL_PAT.match(ln)
+        if not m:
+            return calc
+        this_obj, method, dst, src, _h = m.groups()
+        obj = obj or this_obj
+        if method in ("x", "y", "z") and src.startswith("in."):
+            buckets[method].append((dst, src))
+        else:
+            seconds.append(ln.strip())
+
+    out = []
+    for axis in ("x", "y", "z"):
+        pairs = buckets[axis]
+        if not pairs:
+            continue
+        n = len(pairs)
+        out_arr = ", ".join(dst for dst, _ in pairs)
+        in_arr = ", ".join(src for _, src in pairs)
+        out.append(f"// first derivatives d/d{axis} -- grouped for batch dispatch")
+        out.append("{")
+        out.append(f"    double *const __g{axis}_out[] = {{ {out_arr} }};")
+        out.append(f"    const double *const __g{axis}_in[] = {{ {in_arr} }};")
+        out.append(f"    for (unsigned int __v = 0; __v < {n}; ++__v)")
+        out.append(
+            f"        {obj}.grad_{axis}(__g{axis}_out[__v], __g{axis}_in[__v], "
+            f"h{axis}, sz, bflag);"
+        )
+        out.append(
+            f"    // stage 4b (batch): {obj}.grad_{axis}_batch("
+            f"__g{axis}_out, __g{axis}_in, {n}, h{axis}, sz, bflag);"
+        )
+        out.append("}")
+    if seconds:
+        out.append("// second derivatives (read the first-order buffers above)")
+        out.extend(seconds)
+    tail = "\n" if calc.endswith("\n") else ""
+    return "\n".join(out) + tail
+
+
 def count_deriv_buffers(memalloc_code: str) -> int:
     """Count the `T *NAME = deriv_base + k*BLK_SZ;` buffers in a memalloc carve.
 

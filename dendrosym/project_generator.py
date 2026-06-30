@@ -83,7 +83,7 @@ def _rewrite_deriv_calls(code: str, deriv_obj: str,
 
 # bump when the gencode pipeline changes in a way that invalidates old caches
 # (e.g. changing the printer, CSE settings, .cpp.inc layout, or bcs/ko emission)
-_CACHE_SCHEMA_VERSION = "v10"
+_CACHE_SCHEMA_VERSION = "v11"
 
 
 def _vt_worker_init(inner_workers):
@@ -236,6 +236,9 @@ def _run_var_type(args):
     struct_file = f"{prefix}_{vt}_deriv_struct.cpp.inc"
     (gencode_dir / struct_file).write_text(deriv_struct)
     deriv_calc = dendrosym.codegen.apply_deriv_struct(deriv_calc, _in_names)
+    # regroup into per-axis first-derivative tables (the batch-dispatch seam);
+    # bit-identical -- independent first derivs commute, seconds stay ordered.
+    deriv_calc = dendrosym.codegen.group_deriv_calc(deriv_calc)
 
     # buffer count for this var_type -> sizes NUM_DERIVATIVES (max over vts)
     num_derivs = dendrosym.codegen.count_deriv_buffers(deriv_alloc)
