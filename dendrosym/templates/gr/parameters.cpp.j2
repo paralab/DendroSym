@@ -24,6 +24,7 @@
 
 #include "parameters.h"
 
+#include <param_reader.h>  // dendro_params:: generic TOML reader (shared)
 #include <mpi.h>
 #include <any>
 #include <cctype>
@@ -336,109 +337,21 @@ namespace {{ namespace }} {
 
 namespace {
 
-// Case-insensitive key lookup within a TOML table. Returns the actual key
-// present in the table matching `key` ignoring ASCII case, or "" if none.
-// Lets the reader accept e.g. both par_p_plus and par_P_plus.
-inline std::string find_key_ci(const toml::value& tbl, const std::string& key) {
-    auto lower = [](std::string s) {
-        for (char& c : s) c = (char)std::tolower((unsigned char)c);
-        return s;
-    };
-    if (!tbl.is_table()) return "";
-    const std::string target = lower(key);
-    for (const auto& kv : tbl.as_table()) {
-        if (lower(kv.first) == target) return kv.first;
-    }
-    return "";
-}
-
-// Helper: try to find a key in a TOML table section first, then fall back
-// to the top-level table. This lets users organize params into sections
-// while staying backward-compatible with flat key files.
+// Thin forwarders to the shared dendro_params reader, binding this solver's
+// legacy fallbacks ("{{ namespace }}::KEY" and "{{ project_upper }}_KEY"). The
+// section-first + case-insensitive + flat-key logic lives in <param_reader.h>.
 template <typename T>
-bool try_read(const toml::value& root, const std::string& section,
-              const std::string& key, T& out) {
-    // 1) Try [section].key
-    if (root.contains(section)) {
-        const auto& tbl = root.at(section);
-        if (tbl.contains(key)) {
-            out = toml::find<T>(tbl, key);
-            return true;
-        }
-        // 1b) case-insensitive match within the section
-        std::string ci = find_key_ci(tbl, key);
-        if (!ci.empty()) {
-            out = toml::find<T>(tbl, ci);
-            return true;
-        }
-    }
-    // 2) Try top-level key (flat format)
-    if (root.contains(key)) {
-        out = toml::find<T>(root, key);
-        return true;
-    }
-    // 3) Try legacy format: "namespace::KEY"
-    std::string legacy = "{{ namespace }}::" + key;
-    if (root.contains(legacy)) {
-        out = toml::find<T>(root, legacy);
-        return true;
-    }
-    // Also try with project prefix
-    std::string prefixed = "{{ project_upper }}_" + key;
-    if (root.contains(prefixed)) {
-        out = toml::find<T>(root, prefixed);
-        return true;
-    }
-    return false;
+inline bool try_read(const toml::value& root, const std::string& section,
+                     const std::string& key, T& out) {
+    return dendro_params::try_read(root, section, key, out,
+                                   "{{ namespace }}::", "{{ project_upper }}_");
 }
 
-// Overload for C arrays
 template <typename T, std::size_t N>
-bool try_read_array(const toml::value& root, const std::string& section,
-                    const std::string& key, T (&out)[N]) {
-    std::vector<T> vec;
-
-    // Try section, then flat, then legacy
-    bool found = false;
-    if (root.contains(section)) {
-        const auto& tbl = root.at(section);
-        if (tbl.contains(key)) {
-            vec = toml::find<std::vector<T>>(tbl, key);
-            found = true;
-        }
-        if (!found) {
-            // case-insensitive match within the section
-            std::string ci = find_key_ci(tbl, key);
-            if (!ci.empty()) {
-                vec = toml::find<std::vector<T>>(tbl, ci);
-                found = true;
-            }
-        }
-    }
-    if (!found && root.contains(key)) {
-        vec = toml::find<std::vector<T>>(root, key);
-        found = true;
-    }
-    if (!found) {
-        std::string legacy = "{{ namespace }}::" + key;
-        if (root.contains(legacy)) {
-            vec = toml::find<std::vector<T>>(root, legacy);
-            found = true;
-        }
-    }
-    if (!found) {
-        std::string prefixed = "{{ project_upper }}_" + key;
-        if (root.contains(prefixed)) {
-            vec = toml::find<std::vector<T>>(root, prefixed);
-            found = true;
-        }
-    }
-
-    if (found && vec.size() >= N) {
-        for (std::size_t i = 0; i < N; ++i) out[i] = vec[i];
-        return true;
-    }
-    return found;
+inline bool try_read_array(const toml::value& root, const std::string& section,
+                           const std::string& key, T (&out)[N]) {
+    return dendro_params::try_read_array(root, section, key, out,
+                                         "{{ namespace }}::", "{{ project_upper }}_");
 }
 
 }  // anonymous namespace
