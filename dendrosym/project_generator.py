@@ -804,6 +804,8 @@ class DendroProjectGenerator:
             f"solver/{ctx['project_name']}_main.cpp": "gr/main.cpp.j2",
             # sample parameter file (at project root for easy access)
             f"{ctx['project_name']}_parameters.sample.toml": "gr/sample_params.toml.j2",
+            # physicist's map of the hand-editable hooks
+            "CUSTOMIZE.md": "gr/customize.md.j2",
             # Common templates
             "CMakeLists.txt": "common/CMakeLists.txt.j2",
             "solver/CMakeLists.txt": "common/solver_CMakeLists.txt.j2",
