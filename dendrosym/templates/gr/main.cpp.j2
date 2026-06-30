@@ -190,43 +190,12 @@ int main(int argc, char **argv) {
     // On restore, the mesh + state come straight from the checkpoint; skip the
     // initial-refinement loop so we don't remesh/alter the restored grid.
     if (!{{ namespace }}::{{ project_upper }}_RESTORE_SOLVER) {
-        const unsigned int max_iter =
-            {{ namespace }}::{{ project_upper }}_INIT_GRID_ITER;
-        if (rank == 0)
-            std::cout << YLW << "Starting init_grid_iter loop (max="
-                      << max_iter << " iters)" << NRM << std::endl;
-        for (unsigned int iter = 1; iter <= max_iter; iter++) {
-            if (!ctx->is_remesh()) {
-                if (rank == 0)
-                    std::cout << "[init_grid_iter " << iter
-                              << "] mesh converged (is_remesh=false)"
-                              << std::endl;
-                break;
-            }
-            DendroIntL old_el_l = ctx->get_mesh()->getNumLocalMeshElements();
-            ctx->remesh_and_gridtransfer(
-                {{ namespace }}::{{ project_upper }}_DENDRO_GRAIN_SZ,
-                {{ namespace }}::{{ project_upper }}_LOAD_IMB_TOL,
-                {{ namespace }}::{{ project_upper }}_SPLIT_FIX);
-            DendroIntL new_el_l = ctx->get_mesh()->getNumLocalMeshElements();
-            // Allreduce, not Reduce -- the convergence check below uses
-            // these on every rank, so they must be globally consistent.
-            DendroIntL old_el_g = 0, new_el_g = 0;
-            par::Mpi_Allreduce(&old_el_l, &old_el_g, 1, MPI_SUM, comm);
-            par::Mpi_Allreduce(&new_el_l, &new_el_g, 1, MPI_SUM, comm);
-            if (rank == 0)
-                std::cout << "[init_grid_iter " << iter
-                          << "] elements " << old_el_g << " -> "
-                          << new_el_g << std::endl;
-            mesh = ctx->get_mesh();
-            if (new_el_g == old_el_g) {
-                if (rank == 0)
-                    std::cout << "[init_grid_iter " << iter
-                              << "] mesh converged (stable element count)"
-                              << std::endl;
-                break;
-            }
-        }
+        ctx->refine_initial_grid(
+            comm,
+            {{ namespace }}::{{ project_upper }}_INIT_GRID_ITER,
+            {{ namespace }}::{{ project_upper }}_DENDRO_GRAIN_SZ,
+            {{ namespace }}::{{ project_upper }}_LOAD_IMB_TOL,
+            {{ namespace }}::{{ project_upper }}_SPLIT_FIX);
     }
 
     // keep the local mesh pointer current: init_grid_iter (or a checkpoint
@@ -265,9 +234,7 @@ int main(int argc, char **argv) {
             {{ namespace }}::{{ project_upper }}_COMPD_MAX[0] -
                 {{ namespace }}::{{ project_upper }}_COMPD_MIN[0],
             {{ namespace }}::{{ project_upper }}_ELE_ORDER);
-        ts::TSInfo ts_in = ctx->get_ts_info();
-        ts_in._m_uiTh = {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE;
-        ctx->set_ts_info(ts_in);
+        ctx->set_timestep({{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE);
     }
 
     if (rank == 0)
@@ -316,9 +283,7 @@ int main(int argc, char **argv) {
                     {{ namespace }}::{{ project_upper }}_COMPD_MAX[0] -
                         {{ namespace }}::{{ project_upper }}_COMPD_MIN[0],
                     {{ namespace }}::{{ project_upper }}_ELE_ORDER);
-                ts::TSInfo ts_in = ctx->get_ts_info();
-                ts_in._m_uiTh = {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE;
-                ctx->set_ts_info(ts_in);
+                ctx->set_timestep({{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE);
 
                 ctx->calculate_full_grid_size();
 
@@ -328,7 +293,8 @@ int main(int argc, char **argv) {
                 if (rank == 0)
                     std::cout << "[Remesh] new elements="
                               << mesh->getNumLocalMeshElements()
-                              << " dt=" << ts_in._m_uiTh << std::endl;
+                              << " dt=" << {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE
+                              << std::endl;
             }
         }
 
