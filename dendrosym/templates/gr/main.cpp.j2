@@ -126,32 +126,20 @@ int main(int argc, char **argv) {
                       << " inside [BLK_MIN, BLK_MAX]. AMR disabled."
                       << NRM << std::endl;
 
-        const Point blk_pt_min({{ namespace }}::{{ project_upper }}_BLK_MIN_X,
-                               {{ namespace }}::{{ project_upper }}_BLK_MIN_Y,
-                               {{ namespace }}::{{ project_upper }}_BLK_MIN_Z);
-        const Point blk_pt_max({{ namespace }}::{{ project_upper }}_BLK_MAX_X,
-                               {{ namespace }}::{{ project_upper }}_BLK_MAX_Y,
-                               {{ namespace }}::{{ project_upper }}_BLK_MAX_Z);
+        const double blk_box_min[3] = {{ '{' }}{{ namespace }}::{{ project_upper }}_BLK_MIN_X,
+                                       {{ namespace }}::{{ project_upper }}_BLK_MIN_Y,
+                                       {{ namespace }}::{{ project_upper }}_BLK_MIN_Z};
+        const double blk_box_max[3] = {{ '{' }}{{ namespace }}::{{ project_upper }}_BLK_MAX_X,
+                                       {{ namespace }}::{{ project_upper }}_BLK_MAX_Y,
+                                       {{ namespace }}::{{ project_upper }}_BLK_MAX_Z};
 
-        const unsigned int xRange_b = (unsigned int) X_TO_GRIDX(blk_pt_min.x());
-        const unsigned int yRange_b = (unsigned int) Y_TO_GRIDY(blk_pt_min.y());
-        const unsigned int zRange_b = (unsigned int) Z_TO_GRIDZ(blk_pt_min.z());
-        const unsigned int xRange_e = (unsigned int) X_TO_GRIDX(blk_pt_max.x());
-        const unsigned int yRange_e = (unsigned int) Y_TO_GRIDY(blk_pt_max.y());
-        const unsigned int zRange_e = (unsigned int) Z_TO_GRIDZ(blk_pt_max.z());
-
-        const unsigned int stepSz = 1u << (m_uiMaxDepth - regLev);
-        const unsigned int octMax = 1u << m_uiMaxDepth;
-
-        for (unsigned int x = xRange_b; x < xRange_e; x += stepSz)
-            for (unsigned int y = yRange_b; y < yRange_e; y += stepSz)
-                for (unsigned int z = zRange_b; z < zRange_e; z += stepSz) {
-                    unsigned int xc = (x >= octMax) ? x - 1 : x;
-                    unsigned int yc = (y >= octMax) ? y - 1 : y;
-                    unsigned int zc = (z >= octMax) ? z - 1 : z;
-                    tmpNodes.push_back(
-                        ot::TreeNode(xc, yc, zc, regLev, m_uiDim, m_uiMaxDepth));
-                }
+        ts::seed_block_adaptive_octree(
+            tmpNodes, blk_box_min, blk_box_max,
+            {{ namespace }}::{{ project_upper }}_COMPD_MIN,
+            {{ namespace }}::{{ project_upper }}_COMPD_MAX,
+            {{ namespace }}::{{ project_upper }}_OCTREE_MIN,
+            {{ namespace }}::{{ project_upper }}_OCTREE_MAX,
+            regLev);
     } else {
         if (rank == 0)
             std::cout << YLW << "Using function2Octree. AMR enabled." << NRM
@@ -187,18 +175,9 @@ int main(int argc, char **argv) {
     if (rank == 0) std::cout << "Mesh created successfully." << std::endl;
 
     // allocate derivative workspace (sized for the largest block)
-    {
-        const auto &blkList = mesh->getLocalBlockList();
-        unsigned int max_blk_sz = 0;
-        for (unsigned int i = 0; i < blkList.size(); i++) {
-            unsigned int bsz = blkList[i].getAllocationSzX() *
-                               blkList[i].getAllocationSzY() *
-                               blkList[i].getAllocationSzZ();
-            if (bsz > max_blk_sz) max_blk_sz = bsz;
-        }
-        {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE =
-            new double[{{ namespace }}::{{ project_upper }}_NUM_DERIVATIVES * max_blk_sz];
-    }
+    {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE = ts::realloc_deriv_workspace(
+        {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE, mesh,
+        {{ namespace }}::{{ project_upper }}_NUM_DERIVATIVES);
 
     // ctx first; ETS comes after init_grid_iter so its state is sized to
     // the refined mesh.
@@ -255,19 +234,10 @@ int main(int argc, char **argv) {
     // `mesh` dangling. Track ctx->get_mesh() so the final `delete mesh` is safe.
     mesh = ctx->get_mesh();
 
-    if ({{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE != nullptr) {
-        delete[] {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE;
-        const auto &blkList2 = ctx->get_mesh()->getLocalBlockList();
-        unsigned int max_blk_sz2 = 0;
-        for (unsigned int i = 0; i < blkList2.size(); i++) {
-            unsigned int bsz = blkList2[i].getAllocationSzX() *
-                               blkList2[i].getAllocationSzY() *
-                               blkList2[i].getAllocationSzZ();
-            if (bsz > max_blk_sz2) max_blk_sz2 = bsz;
-        }
-        {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE =
-            new double[{{ namespace }}::{{ project_upper }}_NUM_DERIVATIVES * max_blk_sz2];
-    }
+    // resize the workspace for the (possibly refined) mesh
+    {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE = ts::realloc_deriv_workspace(
+        {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE, ctx->get_mesh(),
+        {{ namespace }}::{{ project_upper }}_NUM_DERIVATIVES);
 
     ts::ETS<DendroScalar, {{ namespace }}::{{ project_upper }}Ctx> *ets =
         new ts::ETS<DendroScalar, {{ namespace }}::{{ project_upper }}Ctx>(ctx);
@@ -289,15 +259,12 @@ int main(int argc, char **argv) {
     // initial dt from CFL on the finest level (else a no-remesh grid keeps the
     // par's fixed rk45_time_step_size). Same formula as the remesh block.
     {
-        unsigned int lmin, lmax;
-        ctx->get_mesh()->computeMinMaxLevel(lmin, lmax);
-        {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE =
-            {{ namespace }}::{{ project_upper }}_CFL_FACTOR *
-            (({{ namespace }}::{{ project_upper }}_COMPD_MAX[0] -
-              {{ namespace }}::{{ project_upper }}_COMPD_MIN[0]) *
-             ((1u << (m_uiMaxDepth - lmax)) /
-              ((double){{ namespace }}::{{ project_upper }}_ELE_ORDER)) /
-             ((double)(1u << m_uiMaxDepth)));
+        {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE = ts::compute_cfl_dt(
+            ctx->get_mesh(),
+            {{ namespace }}::{{ project_upper }}_CFL_FACTOR,
+            {{ namespace }}::{{ project_upper }}_COMPD_MAX[0] -
+                {{ namespace }}::{{ project_upper }}_COMPD_MIN[0],
+            {{ namespace }}::{{ project_upper }}_ELE_ORDER);
         ts::TSInfo ts_in = ctx->get_ts_info();
         ts_in._m_uiTh = {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE;
         ctx->set_ts_info(ts_in);
@@ -335,34 +302,20 @@ int main(int argc, char **argv) {
                     {{ namespace }}::{{ project_upper }}_SPLIT_FIX);
 
                 // reallocate derivative workspace for new mesh block sizes
-                if ({{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE != nullptr)
-                    delete[] {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE;
-                {
-                    const auto &newBlkList = ctx->get_mesh()->getLocalBlockList();
-                    unsigned int new_max_blk_sz = 0;
-                    for (unsigned int b = 0; b < newBlkList.size(); b++) {
-                        unsigned int bsz = newBlkList[b].getAllocationSzX() *
-                                           newBlkList[b].getAllocationSzY() *
-                                           newBlkList[b].getAllocationSzZ();
-                        if (bsz > new_max_blk_sz) new_max_blk_sz = bsz;
-                    }
-                    {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE =
-                        new double[{{ namespace }}::{{ project_upper }}_NUM_DERIVATIVES * new_max_blk_sz];
-                }
+                {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE = ts::realloc_deriv_workspace(
+                    {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE, ctx->get_mesh(),
+                    {{ namespace }}::{{ project_upper }}_NUM_DERIVATIVES);
 
                 // sync the time stepper with the new mesh
                 ets->sync_with_mesh();
 
                 // recompute dt based on new finest level
-                unsigned int lmin, lmax;
-                ctx->get_mesh()->computeMinMaxLevel(lmin, lmax);
-                {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE =
-                    {{ namespace }}::{{ project_upper }}_CFL_FACTOR *
-                    (({{ namespace }}::{{ project_upper }}_COMPD_MAX[0] -
-                      {{ namespace }}::{{ project_upper }}_COMPD_MIN[0]) *
-                     ((1u << (m_uiMaxDepth - lmax)) /
-                      ((double){{ namespace }}::{{ project_upper }}_ELE_ORDER)) /
-                     ((double)(1u << m_uiMaxDepth)));
+                {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE = ts::compute_cfl_dt(
+                    ctx->get_mesh(),
+                    {{ namespace }}::{{ project_upper }}_CFL_FACTOR,
+                    {{ namespace }}::{{ project_upper }}_COMPD_MAX[0] -
+                        {{ namespace }}::{{ project_upper }}_COMPD_MIN[0],
+                    {{ namespace }}::{{ project_upper }}_ELE_ORDER);
                 ts::TSInfo ts_in = ctx->get_ts_info();
                 ts_in._m_uiTh = {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE;
                 ctx->set_ts_info(ts_in);
