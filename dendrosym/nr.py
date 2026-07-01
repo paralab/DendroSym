@@ -870,6 +870,84 @@ def build_sym_3x3(f, mode="upper"):
 
 
 ##########################################################################
+# index-notation helpers -- write tensor equations closer to the paper
+# instead of hand-rolling `sym.Matrix([...]).reshape(3,3)` + `sum([...])`.
+##########################################################################
+
+
+def rank2(f):
+    """Build a 3x3 rank-2 tensor ``T_ij = f(i, j)``.
+
+    Drop-in for the ``sym.Matrix([f(i,j) for i,j in e_ij]).reshape(3, 3)``
+    idiom. For a manifestly-symmetric result prefer :func:`build_sym_3x3`.
+    """
+    return sym.Matrix([f(ii, jj) for ii, jj in e_ij]).reshape(3, 3)
+
+
+def vec3(f):
+    """Build a length-3 rank-1 tensor ``V_i = f(i)``."""
+    return sym.Matrix([f(ii) for ii in e_i])
+
+
+def sum_i(f):
+    """Einstein-sum one index: ``sum_k f(k)`` over ``k in {0,1,2}``."""
+    return sum([f(kk) for kk in e_i])
+
+
+def sum_ij(f):
+    """Einstein-sum a pair of indices: ``sum_kl f(k, l)`` over ``k,l in {0,1,2}``."""
+    return sum([f(kk, ll) for kk, ll in e_ij])
+
+
+def einsum(subscripts, *operands):
+    """Einstein-summation contraction over sympy tensors (index space {0,1,2}).
+
+    numpy-style spec, e.g. ``einsum("ik,jk->ij", gt, Dbeta)`` = ``gamma_ik
+    Dbeta_jk`` (sum over k). Each operand is indexed by its letters: rank-1 ->
+    ``op[i]`` (3-vector / column Matrix), rank-2 -> ``op[i, j]`` (3x3 Matrix).
+    Repeated letters absent from the output are summed; output letters are the
+    free indices. Output rank 0 / 1 / 2 -> scalar / 3-vector / 3x3 Matrix.
+
+    This is the recommended *standard* for tensor contractions -- it reads like
+    the paper's index notation. It builds the same sympy expression as the
+    hand-rolled ``sum([...])`` form, so it is a pure notation change. For terms
+    it can't express cleanly (rank-3 Christoffels, det/ln, trace-frees), drop to
+    :func:`rank2`/:func:`sum_i` or the existing tensor helpers -- all just sympy.
+    """
+    import itertools
+
+    lhs, _, out = subscripts.replace(" ", "").partition("->")
+    terms = lhs.split(",")
+    summed = [c for c in dict.fromkeys("".join(terms)) if c not in out]
+
+    def _elem(op, letters, asn):
+        idx = tuple(asn[c] for c in letters)
+        return op[idx[0]] if len(idx) == 1 else op[idx[0], idx[1]]
+
+    def _comp(asn0):
+        total = 0
+        for vals in itertools.product(e_i, repeat=len(summed)):
+            asn = dict(asn0)
+            asn.update(zip(summed, vals))
+            prod = None
+            for op, letters in zip(operands, terms):
+                el = _elem(op, letters, asn)
+                prod = el if prod is None else prod * el
+            total = total + prod
+        return total
+
+    if len(out) == 0:
+        return _comp({})
+    if len(out) == 1:
+        return sym.Matrix([_comp({out: ii}) for ii in e_i])
+    if len(out) == 2:
+        return sym.Matrix(
+            [_comp({out[0]: ii, out[1]: jj}) for ii, jj in e_ij]
+        ).reshape(3, 3)
+    raise ValueError("einsum: output rank > 2 not supported")
+
+
+##########################################################################
 # metric related functions
 ##########################################################################
 
