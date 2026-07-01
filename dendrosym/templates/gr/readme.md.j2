@@ -1,0 +1,35 @@
+# {{ project_upper }}
+
+A generated general-relativity solver. You write the physics once in Python; the
+framework generates, builds, and runs the C++. ({{ evolution_num_vars }} evolution
+variables, {{ constraint_num_vars }} constraints.)
+
+## How it works
+```
+{{ project_name }}.py        the physics: equations, parameters, initial data
+   │   python {{ project_name }}.py        (generate)
+   ▼
+solver/                  generated C++ — kernels + framework glue (don't edit)
+   │   cmake --build         (compile)
+   ▼
+{{ project_name }}Solver run.toml     run a simulation
+```
+
+## Quickstart
+```
+python {{ project_name }}.py
+cmake -B build && cmake --build build -j
+./build/solver/{{ project_name }}Solver {{ project_name }}_parameters.sample.toml
+```
+
+## Where things live
+| Want to… | Look in |
+|---|---|
+| Read/change the equations | `{{ project_name }}.py` |
+| Change a run (resolution, time, output) | `{{ project_name }}_parameters.sample.toml` |
+| Know what's safe to hand-edit | `CUSTOMIZE.md` |
+| Generated C++ (don't edit — regenerate instead) | `solver/` |
+
+New here? Read `{{ project_name }}.py` for the physics and `CUSTOMIZE.md` for the
+handful of things you'd ever change by hand. You should never need to touch
+`solver/`.
