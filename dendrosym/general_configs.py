@@ -2379,9 +2379,21 @@ class DendroConfiguration:
                 agrad_list.add(a)
 
         if sort:
-            grad_list = sorted(list(grad_list), key=lambda x: str(x.args[1]))
-            grad2_list = sorted(list(grad2_list), key=lambda x: str(x.args[2]))
-            agrad_list = sorted(list(agrad_list), key=lambda x: str(x.args[1]))
+            # sort by (variable, direction indices) -- a FULL key. Keying on the
+            # variable alone leaves the per-variable directions tied, so they fell
+            # back to the hash-ordered set() and the emitted buffer order was
+            # PYTHONHASHSEED-dependent (functionally identical, but not byte-
+            # reproducible across fresh regens -> see [[gencode non-determinism]]).
+            grad_list = sorted(
+                grad_list, key=lambda x: (str(x.args[1]), int(x.args[0]))
+            )
+            grad2_list = sorted(
+                grad2_list,
+                key=lambda x: (str(x.args[2]), int(x.args[0]), int(x.args[1])),
+            )
+            agrad_list = sorted(
+                agrad_list, key=lambda x: (str(x.args[1]), int(x.args[0]))
+            )
 
         return grad_list, grad2_list, agrad_list
 
