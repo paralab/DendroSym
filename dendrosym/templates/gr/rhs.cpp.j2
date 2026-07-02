@@ -114,20 +114,24 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
     auto &{{ deriv_obj }} = *{{ namespace }}::{{ project_upper }}_DERIVS;
 {% endif %}
 
-    // -- intermediate derivatives --
-    // when equations have derivatives of compound expressions (e.g. d(chi*gt)),
-    // the chain rule gets expanded and creates intermediate derivative vars.
-    // these are allocated and computed before the standard derivatives.
+    // -- standard derivative computation --
+    // d.bind() carves the workspace into named buffers (d.alpha_x, d.alpha_xy, ...).
+{% if evolution_gencode is defined and evolution_gencode.deriv_calc is defined %}
+    {{ evolution_deriv_struct_name }} d;
+    d.bind(deriv_base, BLK_SZ);
+{% endif %}
+
+    // -- intermediate (compound-expression) derivatives --
+    // when equations differentiate a compound expression (e.g. d(chi*gt)), the
+    // compound is materialized once into a staged d.* buffer here; deriv_calc
+    // below then differentiates it alongside the ordinary derivatives.
 {% if evolution_gencode is defined and evolution_gencode.intermediate_grad is defined %}
 #include "../gencode/{{ evolution_gencode.intermediate_grad }}"
 {% endif %}
 
-    // -- standard derivative computation --
-    // d.bind() carves the workspace into named buffers (d.alpha_x, d.alpha_xy, ...);
-    // deriv_calc fills them with the finite-difference stencils.
+    // deriv_calc fills the derivative buffers with the finite-difference stencils
+    // (including the staged derivatives of the intermediate buffers above).
 {% if evolution_gencode is defined and evolution_gencode.deriv_calc is defined %}
-    {{ evolution_deriv_struct_name }} d;
-    d.bind(deriv_base, BLK_SZ);
 #include "../gencode/{{ evolution_gencode.deriv_calc }}"
 {% endif %}
 

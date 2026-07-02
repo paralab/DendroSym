@@ -451,7 +451,9 @@ def rename_deriv_buffers(code: str, field_names, use_advective: bool = False) ->
     return code
 
 
-def apply_deriv_struct(code: str, field_names=None, struct: str = "d") -> str:
+def apply_deriv_struct(
+    code: str, field_names=None, struct: str = "d", extra_names=None
+) -> str:
     """Prefix derivative-buffer reads `chi_x` -> `struct.chi_x` (`d.`).
 
     Run AFTER `rename_deriv_buffers`, so the buffers are in operator form. Keyed
@@ -460,13 +462,50 @@ def apply_deriv_struct(code: str, field_names=None, struct: str = "d") -> str:
     Apply to the deriv-calc/equations/KO/BC, NOT the struct definition (whose
     members are the bare names). With no field set, falls back to the canonical
     `grad_*` token shape (pre-rename behaviour).
+
+    `extra_names` is an explicit set of staged/intermediate buffer names (e.g.
+    `DENDRO_STAGED_GRAD_000`, `..._intermediate`) that are not field-derived
+    operator names; they are prefixed by exact match (longest-first + word
+    boundary so a name that is a prefix of another does not partial-match).
     """
     if not struct:
         return code
     if not field_names:
-        return regex.sub(rf"(?<![\w.]){_DERIV_BUF_PAT}", rf"{struct}.\1", code)
-    pat = rf"((?:adv_)?(?:{_fields_alt(field_names)})_{_AXIS_SUFFIX})"
-    return regex.sub(rf"(?<![\w.]){pat}\b", rf"{struct}.\1", code)
+        code = regex.sub(rf"(?<![\w.]){_DERIV_BUF_PAT}", rf"{struct}.\1", code)
+    else:
+        pat = rf"((?:adv_)?(?:{_fields_alt(field_names)})_{_AXIS_SUFFIX})"
+        code = regex.sub(rf"(?<![\w.]){pat}\b", rf"{struct}.\1", code)
+    if extra_names:
+        alt = "|".join(
+            regex.escape(n) for n in sorted(extra_names, key=len, reverse=True)
+        )
+        code = regex.sub(rf"(?<![\w.])({alt})\b", rf"{struct}.\1", code)
+    return code
+
+
+def malloc_to_carve(malloc_code: str, start_offset: int = 0):
+    """Convert malloc'd staged-buffer decls to `deriv_base` carve lines.
+
+    `T *NAME = (T *)malloc(...);` -> `T * NAME = deriv_base + k * BLK_SZ;`,
+    numbering from `start_offset`. Returns `(carve_code, names)`. Non-matching
+    lines (comments, blanks) are dropped -- the carve is appended to the
+    deriv-workspace memalloc so the staged/intermediate buffers join the `d.`
+    struct + `count()` alongside the ordinary derivative buffers.
+    """
+    carve, names = [], []
+    k = start_offset
+    for line in malloc_code.splitlines():
+        m = regex.match(
+            r"\s*(\w[\w ]*?)\s*\*\s*(\w+)\s*=\s*\([^)]*\)\s*malloc\([^;]*;\s*$",
+            line,
+        )
+        if not m:
+            continue
+        dtype, name = m.group(1), m.group(2)
+        carve.append(f"{dtype} * {name} = deriv_base + {k} * BLK_SZ;")
+        names.append(name)
+        k += 1
+    return ("\n".join(carve) + ("\n" if carve else "")), names
 
 
 def gen_deriv_struct(memalloc_code: str, struct_name: str) -> str:

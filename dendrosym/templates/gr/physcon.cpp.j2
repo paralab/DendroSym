@@ -92,13 +92,18 @@ void {{ project_name }}physcon(double **unzipConsVars, const double **uZipVars,
 {% endif %}
 
     // derivative computation for constraints
+{% if constraint_gencode is defined and constraint_gencode.deriv_calc is defined %}
+    {{ constraint_deriv_struct_name }} d;
+    d.bind(deriv_base, BLK_SZ);
+{% endif %}
+
+    // intermediate (compound-expression) derivatives: materialize the compound
+    // into a staged d.* buffer before deriv_calc differentiates it.
 {% if constraint_gencode is defined and constraint_gencode.intermediate_grad is defined %}
 #include "../gencode/{{ constraint_gencode.intermediate_grad }}"
 {% endif %}
 
 {% if constraint_gencode is defined and constraint_gencode.deriv_calc is defined %}
-    {{ constraint_deriv_struct_name }} d;
-    d.bind(deriv_base, BLK_SZ);
 #include "../gencode/{{ constraint_gencode.deriv_calc }}"
 {% endif %}
 

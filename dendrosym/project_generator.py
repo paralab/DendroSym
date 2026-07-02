@@ -110,6 +110,13 @@ def _vt_cache_key(config, vt):
     parts.append(config.idx_str)
     parts.append(getattr(config, "deriv_obj", "") or "")
     parts.append(str(getattr(config, "use_advective_derivs", False)))
+    # the staging path (compound derivs materialized once, not algebraically
+    # expanded) emits different gencode for the SAME raw equations, so it must
+    # key distinctly. Only appended when non-default (staging on), so the default
+    # expand path keeps its existing cache keys -- no forced regen for solvers
+    # that never stage.
+    if not getattr(config, "replace_and_expand_derivatives", True):
+        parts.append("staged_compound_derivs")
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
@@ -229,13 +236,45 @@ def _run_var_type(args):
         deriv_calc, _in_names, use_advective
     )
 
+    # staged / intermediate derivatives: derivatives of compound expressions
+    # (e.g. d(A*B)) that are materialized once, then differentiated. The staged
+    # deriv + intermediate buffers join the `d.` workspace struct (carved from
+    # deriv_base like any other buffer) and the staged deriv CALLS append to
+    # deriv_calc so they flow through _rewrite/apply_deriv_struct/group_deriv_calc
+    # and batch like the rest. The compound-expression LOOP that fills the
+    # intermediate buffers stays separate (intermediate_str, runs after d.bind).
+    # Empty for solvers with no compound derivs (CCZ4) -> byte-identical output.
+    print(f"    generating intermediate derivatives...", file=sys.stderr)
+    staged = config.generate_staged_deriv_parts(vt, dtype="double")
+    staged_names = []
+    intermediate_str = "// NO INTERMEDIATE DERIVATIVES FOUND\n"
+    dealloc_intermediate_str = ""
+    if staged["found"]:
+        _n0 = dendrosym.codegen.count_deriv_buffers(deriv_alloc)
+        staged_carve, staged_names = dendrosym.codegen.malloc_to_carve(
+            staged["alloc"], _n0
+        )
+        deriv_alloc = deriv_alloc + staged_carve
+        staged_calls = staged["deriv_calls"]
+        if deriv_obj_name:
+            staged_calls = _rewrite_deriv_calls(
+                staged_calls, deriv_obj_name, use_advective=use_advective
+            )
+        deriv_calc = deriv_calc + staged_calls
+        intermediate_str = staged["expr_loop"]
+        dealloc_intermediate_str = (
+            "// NO DEALLOCATION REQUIRED (staged buffers are carved from workspace)\n"
+        )
+
     # build the derivative-workspace struct from the (deduped, renamed) carve,
     # and point the deriv-calc at `d.<buffer>` instead of the bare buffer name.
     deriv_struct_name = f"{prefix}_{vt}_derivs_t"
     deriv_struct = dendrosym.codegen.gen_deriv_struct(deriv_alloc, deriv_struct_name)
     struct_file = f"{prefix}_{vt}_deriv_struct.cpp.inc"
     (gencode_dir / struct_file).write_text(deriv_struct)
-    deriv_calc = dendrosym.codegen.apply_deriv_struct(deriv_calc, _in_names)
+    deriv_calc = dendrosym.codegen.apply_deriv_struct(
+        deriv_calc, _in_names, extra_names=staged_names
+    )
     # regroup into per-axis first-derivative tables (the batch-dispatch seam);
     # bit-identical -- independent first derivs commute, seconds stay ordered.
     deriv_calc = dendrosym.codegen.group_deriv_calc(deriv_calc)
@@ -247,25 +286,13 @@ def _run_var_type(args):
     (gencode_dir / calc_file).write_text(deriv_calc)
     (gencode_dir / dealloc_file).write_text(deriv_dealloc)
 
-    print(f"    generating intermediate derivatives...", file=sys.stderr)
-    try:
-        intermediate_str, dealloc_intermediate_str = (
-            config.generate_pre_necessary_derivatives(
-                vt, dtype="double", include_byte_declaration=False
-            )
-        )
-    except Exception:
-        intermediate_str = ""
-        dealloc_intermediate_str = ""
-
-    # intermediate derivs read input fields too -> group under `in.`
+    # the compound-expression loop reads input fields (`in.`) and writes the
+    # staged intermediate buffers (`d.`); it runs after d.bind, before deriv_calc.
     intermediate_str = dendrosym.codegen.apply_input_struct(
         intermediate_str, _in_names, _in_struct
     )
-    if not use_advective:
-        intermediate_str = dendrosym.codegen.fold_agrad_to_grad(intermediate_str)
-    intermediate_str = dendrosym.codegen.rename_deriv_buffers(
-        intermediate_str, _in_names, use_advective
+    intermediate_str = dendrosym.codegen.apply_deriv_struct(
+        intermediate_str, None, extra_names=staged_names
     )
 
     intermediate_file = f"{prefix}_{vt}_intermediate_grad.cpp.inc"
@@ -282,7 +309,9 @@ def _run_var_type(args):
     rhs_code = dendrosym.codegen.rename_deriv_buffers(
         rhs_code, _in_names, use_advective
     )
-    rhs_code = dendrosym.codegen.apply_deriv_struct(rhs_code, _in_names)
+    rhs_code = dendrosym.codegen.apply_deriv_struct(
+        rhs_code, _in_names, extra_names=staged_names
+    )
     rhs_file = f"{prefix}_{vt}_rhs_eqns.cpp.inc"
     (gencode_dir / rhs_file).write_text(rhs_code)
 
@@ -293,7 +322,9 @@ def _run_var_type(args):
         bcs_code = dendrosym.codegen.rename_deriv_buffers(
             bcs_code, _in_names, use_advective
         )
-        bcs_code = dendrosym.codegen.apply_deriv_struct(bcs_code, _in_names)
+        bcs_code = dendrosym.codegen.apply_deriv_struct(
+            bcs_code, _in_names, extra_names=staged_names
+        )
     except Exception:
         bcs_code = ""
 

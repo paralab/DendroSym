@@ -1212,10 +1212,25 @@ class DendroConfiguration:
                 found_derivatives = []
 
         else:
-            print("NOTE: Override for finding and replacing derivatives was set!")
-            new_exprs_again = all_exp
+            # Staging mode (replace_and_expand_derivatives=False): do NOT
+            # algebraically expand derivatives of compound expressions. Instead
+            # replace grad(<compound>) with DENDRO_STAGED_* symbols and record
+            # the intermediate derivatives so they get materialized (compute the
+            # compound once, then differentiate) before the main deriv pass.
+            print("NOTE: Staging derivatives of compound expressions (no expansion)!")
             found_derivatives = []
-            new_staged_exprs = staged_exp
+            new_exprs_again = []
+            for expr in all_exp:
+                new_expr, found_derivatives = self.find_and_replace_complex_ders_staged(
+                    expr, found_derivatives, 0, self.idx_str
+                )
+                new_exprs_again.append(new_expr)
+            new_staged_exprs = []
+            for expr in staged_exp:
+                new_expr, found_derivatives = self.find_and_replace_complex_ders_staged(
+                    expr, found_derivatives, 0, self.idx_str
+                )
+                new_staged_exprs.append(new_expr)
 
         # store them internally so we don't lose them
         self.stored_rhs_function[var_type] = {
@@ -1572,21 +1587,17 @@ class DendroConfiguration:
     def find_and_sort_atoms(expr, objs: list):
         # TODO: fix this if expression isn't a sympy object
 
-        # find the atoms
-        atoms = np.array(list(expr.atoms(*objs)))
-
-        num_sub_exprs = []
-
-        # find the total number of sub expressions
-        for ii, at in enumerate(atoms):
-            num_sub_exprs.append(len(at.atoms(*objs)))
-
-        num_sub_exprs = np.array(num_sub_exprs)
-        # then we arg sort and flip so it's largest to shortest
-        sorted_idxs = np.flip(np.argsort(num_sub_exprs))
-
-        # then we return the sorted list
-        return atoms[sorted_idxs].tolist()
+        # `expr.atoms(...)` returns a hash-ordered set. Sort DETERMINISTICALLY:
+        # primary key = number of sub-expressions (largest to shortest, so nested
+        # derivatives are processed outer-first, preserving the original intent),
+        # secondary key = string form to break ties reproducibly. Determinism is
+        # required for the staged-derivative naming (DENDRO_STAGED_GRAD_nnn) to
+        # hash stably across runs so the gencode cache stays valid. (This is only
+        # reached on the staging path; the expand path early-returns before it.)
+        atoms = sorted(
+            expr.atoms(*objs), key=lambda at: (-len(at.atoms(*objs)), str(at))
+        )
+        return atoms
 
     @staticmethod
     def find_repeat_derivative_terms(
@@ -1766,6 +1777,136 @@ class DendroConfiguration:
         outstr += final_intermediate_dealloc
 
         return outstr, out_dealloc
+
+    def generate_staged_deriv_parts(self, var_type, dtype="double"):
+        """Emit the staged/intermediate derivative code as separable pieces.
+
+        Same discovery + dedup as `generate_pre_necessary_derivatives`, but the
+        output is split so the project generator can weave each piece into the
+        modern deriv pipeline instead of the legacy self-contained malloc block:
+
+          - ``alloc``       : the staged-deriv + intermediate buffer decls (still
+                              in malloc form -- the generator converts them to
+                              ``deriv_base`` carve lines so they join the ``d.``
+                              workspace struct, see ``codegen.malloc_to_carve``).
+          - ``expr_loop``   : boundary setup + the pointwise loop that materializes
+                              each compound expression into its intermediate buffer
+                              (runs after ``d.bind``, before the deriv calc).
+          - ``deriv_calls`` : the bare ``deriv_{x,..}(dst, src, ...)`` calls, no
+                              comment lines, so they append cleanly to deriv_calc
+                              and flow through _rewrite_deriv_calls / apply_deriv_
+                              struct / group_deriv_calc like any other deriv.
+
+        Returns a dict; ``found=False`` (with empty pieces) when the var_type has
+        no staged derivatives -- the CCZ4 / no-intermediate path.
+        """
+        (
+            exprs,
+            all_rhs_names,
+            found_derivatives,
+            orig_n_exp,
+            new_staged_exprs,
+            staged_names,
+        ) = self.find_derivatives(var_type)
+
+        empty = {"found": False, "alloc": "", "expr_loop": "", "deriv_calls": ""}
+        if len(found_derivatives) == 0:
+            return empty
+
+        t = "    "
+
+        # boundary start/end for the intermediate expression loop
+        bounds = "// initializing start and end points for the grids\n"
+        bounds += "unsigned int kstart = 0, jstart = 0, istart = 0;\n"
+        bounds += "unsigned int kend = nz, jend = ny, iend = nx;\n\n"
+        for flag, adj in (
+            ("OCT_DIR_LEFT", "istart += PW;"),
+            ("OCT_DIR_RIGHT", "iend -= PW;"),
+            ("OCT_DIR_DOWN", "jstart += PW;"),
+            ("OCT_DIR_UP", "jend -= PW;"),
+            ("OCT_DIR_BACK", "kstart += PW;"),
+            ("OCT_DIR_FRONT", "kend -= PW;"),
+        ):
+            bounds += f"if (bflag & (1u << {flag})) {{\n    {adj}\n}}\n\n"
+
+        loop_open = "/**\n * CALCULATING INTERMEDIATE EXPRESSIONS\n */\n"
+        loop_open += "for (unsigned int k = kstart; k < kend; k++)\n"
+        loop_open += t + "{\n"
+        loop_open += t + "for (unsigned int j = jstart; j < jend; j++)\n"
+        loop_open += t + "{\n"
+        loop_open += t * 2 + "for (unsigned int i = istart; i < iend; i++)\n"
+        loop_open += t * 2 + "{\n"
+        loop_open += t * 3 + f"const {dtype} x = pmin[0] + i * hx;\n"
+        loop_open += t * 3 + f"const {dtype} y = pmin[1] + j * hy;\n"
+        loop_open += t * 3 + f"const {dtype} z = pmin[2] + k * hz;\n\n"
+        loop_open += t * 3 + "const unsigned int pp = i + nx * (j + ny * k);\n\n"
+
+        found_derivatives = self.sort_found_derivatives(found_derivatives)
+        max_depth = self.find_max_depth_value(found_derivatives)
+
+        already_calculated_inters = []
+        already_added_derivs = []
+
+        alloc_lines = []      # malloc decls (staged deriv + intermediate buffers)
+        expr_loop = bounds
+        deriv_calls = []      # bare deriv_{x,..}(...) lines only
+
+        for curr_depth in reversed(range(max_depth + 1)):
+            curr_calc = ""
+            ders_remove = []
+
+            for ii, deriv_info in enumerate(found_derivatives):
+                if deriv_info["depth"] != curr_depth:
+                    continue
+
+                already_included, inter_var_name = self.find_if_inter_processed(
+                    already_calculated_inters, deriv_info, self.idx_str
+                )
+
+                (
+                    all_str,
+                    all_tmp_str,
+                    calc_str,
+                    deriv_str,
+                    _deall_str,
+                    _deall_tmp_str,
+                ) = self.gen_individual_der_strs(
+                    deriv_info,
+                    inter_var_name,
+                    already_calculated_inters=already_added_derivs,
+                )
+
+                if all_str.strip():
+                    alloc_lines.append(all_str.rstrip("\n"))
+                if all_tmp_str.strip():
+                    alloc_lines.append(all_tmp_str.rstrip("\n"))
+                curr_calc += calc_str
+                if deriv_str.strip():
+                    deriv_calls.append(deriv_str.rstrip("\n"))
+
+                if not already_included:
+                    already_calculated_inters.append(deriv_info)
+                already_added_derivs.append(deriv_info)
+                ders_remove.append(ii)
+
+            # only emit a loop body for this depth if it produced expressions
+            if curr_calc.strip():
+                expr_loop += (
+                    loop_open
+                    + curr_calc
+                    + t * 2 + "}\n" + t + "}\n" + "}\n\n"
+                )
+
+            if max_depth > 0:
+                for idx in sorted(ders_remove, reverse=True):
+                    del found_derivatives[idx]
+
+        return {
+            "found": True,
+            "alloc": "\n".join(alloc_lines) + "\n",
+            "expr_loop": expr_loop,
+            "deriv_calls": "\n".join(deriv_calls) + "\n",
+        }
 
     @staticmethod
     def find_max_depth_value(deriv_info):
