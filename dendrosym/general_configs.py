@@ -286,16 +286,27 @@ class DendroConfiguration:
 
             print("... finished replacing the derivatives")
 
-        # start with the staged expressions
+        # start with the staged expressions -- a user-declared block of shared
+        # intermediate quantities (e.g. Ricci/Cotton) computed ONCE per point,
+        # CSE'd, and emitted before the main RHS so the equations can reference
+        # them by name. Each staged var is declared as a local (`double X = ...`)
+        # and reads input fields via `in.` + derivative buffers via `d.` (the
+        # rename/apply_deriv_struct passes downstream complete the `d.` naming).
         if len(staged_exp) > 0:
             cse_exp = dendrosym.codegen.construct_cse_from_list(
                 staged_exp, temp_var_prefix="DENDRO_STAGED_VAR_"
             )
 
-            # NO INDEX STRING HERE, WE AREN'T INDEXING INTO THEM. orig_ops=0
-            # since generate_cpu_preextracted only uses it for return_stats=True
+            # declare each staged output as a local double; group input-field
+            # reads under `in.` (same as the main RHS). NO index string -- the
+            # staged vars are per-point locals, not [pp]-arrays.
             output_str = dendrosym.codegen.generate_cpu_preextracted(
-                cse_exp, staged_exprs_names, "", 0
+                cse_exp,
+                ["double " + str(n) for n in staged_exprs_names],
+                "",
+                0,
+                input_names=self.input_var_names(),
+                input_struct=self.input_struct_name(),
             )
         else:
             output_str = ""
@@ -672,6 +683,20 @@ class DendroConfiguration:
             out_enum_names.append(f"{enum_prefix}_{the_var.upper()}")
 
         return out_enum_names
+
+    def add_staged_function(self, var_type: str, staged_func):
+        """Register a staged-variable function for a var_type.
+
+        `staged_func` is a zero-arg callable returning `(exprs, names)`: a list of
+        scalar SymPy expressions and the matching output-variable names. These are
+        shared intermediate quantities (e.g. Ricci/Cotton) computed once per point,
+        CSE'd, and emitted before the RHS so the equations reference them by name.
+        Their derivatives are folded into the `d.` workspace automatically. Only
+        one staged function per var_type (later calls override).
+        """
+        if var_type == "parameter":
+            raise ValueError("Cannot set staged function to parameters")
+        self.stored_staged_exprs[var_type] = staged_func
 
     def set_rhs_equation_function(
         self, var_type: str, rhs_func, override_checks: bool = False
@@ -2088,10 +2113,17 @@ class DendroConfiguration:
             like SOLVER_DERIVS->grad_x(...) instead of legacy deriv_x(...).
         """
 
-        # get the RHS stuff
+        # get the RHS stuff. Scan BOTH the main RHS and the staged expressions
+        # for derivatives -- the staged block (computed before the RHS loop body)
+        # reads derivative buffers too, so they must be carved into the `d.`
+        # workspace. staged_exprs is empty for solvers without a staged function
+        # (e.g. CCZ4), so this is identical to scanning the main exprs alone.
         temp_funcs = self.stored_rhs_function[var_type]
+        _deriv_scan_exprs = list(temp_funcs["exprs"]) + list(
+            temp_funcs.get("staged_exprs", []) or []
+        )
         grad_list, grad2_list, agrad_list = self.find_all_unique_ders(
-            temp_funcs["exprs"], temp_funcs["all_rhs_names"]
+            _deriv_scan_exprs, temp_funcs["all_rhs_names"]
         )
 
         self.current_index = 0
