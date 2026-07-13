@@ -283,6 +283,9 @@ int {{ project_upper }}Ctx::rhs(DVec *in, DVec *out, unsigned int sz,
 // =========================================================================
 
 int {{ project_upper }}Ctx::pre_stage(DVec &sIn) { return 0; }
+// post_stage receives the RK stage derivative, not a state -- enforcement of
+// algebraic constraints happens in post_timestep, which the ETS already calls
+// on every intermediate stage state.
 int {{ project_upper }}Ctx::post_stage(DVec &sIn) { return 0; }
 int {{ project_upper }}Ctx::pre_timestep(DVec &sIn) { return 0; }
 
@@ -809,11 +812,19 @@ bool {{ project_upper }}Ctx::is_remesh() {
 {% if enable_bh_tracking %}
     auto run_bh_loc = [this](bool overwrite) {
         dendro_gr::BHLocCfg cfg;
-        cfg.bh_locations  = {m_uiBHLoc[0], m_uiBHLoc[1]};
-        cfg.bh_amr_radii  = {{ '{' }}{{ project_upper }}_BH1_AMR_R,
-                             {{ project_upper }}_BH2_AMR_R{{ '}' }};
-        cfg.bh_max_levels = {{ '{' }}{{ project_upper }}_BH1_MAX_LEV,
-                             {{ project_upper }}_BH2_MAX_LEV{{ '}' }};
+        // Only refine around active BHs; an inert (mass-0) puncture must not
+        // build a phantom onion. No-op for a real binary (both > tol).
+        constexpr double BH_ACTIVE_MASS_TOL = 1.0e-6;
+        if (BH1.getBHMass() > BH_ACTIVE_MASS_TOL) {
+            cfg.bh_locations.push_back(m_uiBHLoc[0]);
+            cfg.bh_amr_radii.push_back({{ project_upper }}_BH1_AMR_R);
+            cfg.bh_max_levels.push_back({{ project_upper }}_BH1_MAX_LEV);
+        }
+        if (BH2.getBHMass() > BH_ACTIVE_MASS_TOL) {
+            cfg.bh_locations.push_back(m_uiBHLoc[1]);
+            cfg.bh_amr_radii.push_back({{ project_upper }}_BH2_AMR_R);
+            cfg.bh_max_levels.push_back({{ project_upper }}_BH2_MAX_LEV);
+        }
         cfg.ratio         = {{ project_upper }}_AMR_R_RATIO;
         cfg.min_level     = {{ project_upper }}_MINDEPTH;
         cfg.overwrite     = overwrite;
@@ -1243,8 +1254,11 @@ void {{ project_upper }}Ctx::evolve_bh_loc() {
     dendro_gr::trackPunctures(m_uiMesh, (double **)evar, beta_idx, m_uiBHLoc,
                               newLoc, 2, grid_limits, domain_limits, dt);
 
-    m_uiBHLoc[0] = newLoc[0];
-    m_uiBHLoc[1] = newLoc[1];
+    // Pin an inert (mass-0) BH at its initial location; don't chase a
+    // nonexistent well. No-op for a real binary (both > tol).
+    constexpr double BH_ACTIVE_MASS_TOL = 1.0e-6;
+    if (BH1.getBHMass() > BH_ACTIVE_MASS_TOL) m_uiBHLoc[0] = newLoc[0];
+    if (BH2.getBHMass() > BH_ACTIVE_MASS_TOL) m_uiBHLoc[1] = newLoc[1];
     {{ project_upper }}_BH_LOC[0] = m_uiBHLoc[0];
     {{ project_upper }}_BH_LOC[1] = m_uiBHLoc[1];
     store_bh_loc_history();
@@ -1264,6 +1278,11 @@ int {{ project_upper }}Ctx::write_bh_coords() {
 
 bool {{ project_upper }}Ctx::is_bh_merged(double tol) {
     if (m_bIsBHMerged) return true;
+    // No binary to merge if either BH is inert. No-op for a real binary.
+    constexpr double BH_ACTIVE_MASS_TOL = 1.0e-6;
+    if (BH1.getBHMass() <= BH_ACTIVE_MASS_TOL ||
+        BH2.getBHMass() <= BH_ACTIVE_MASS_TOL)
+        return false;
     double dist = (m_uiBHLoc[0] - m_uiBHLoc[1]).abs();
     return dist < tol;
 }
