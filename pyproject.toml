@@ -1,23 +1,47 @@
-[tool.poetry]
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
 name = "dendrosym"
 version = "0.1.0"
-description = ""
-authors = ["Your Name <you@example.com>"]
+description = "Symbolic generator for Dendro C++ GR/NR solver code."
 readme = "README.md"
+license = { file = "License" }
+requires-python = ">=3.8"
+authors = [
+    { name = "David Van Komen", email = "david.paralab@proton.me" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "matplotlib>=3.7",
+    "networkx>=3.1",
+    "sympy>=1.12",
+    "dill>=0.3.8",
+    "tomlkit>=0.11.8",
+    "jinja2>=3.1",
+    "tqdm>=4.60",
+    "numpy>=1.24",
+    "GitPython>=3.1",
+]
 
-[tool.poetry.dependencies]
-python = "^3.8"
-matplotlib = "^3.7.1"
-networkx = "^3.1"
-sympy = "^1.12"
-dill = "^0.3.8"
-tomlkit = "^0.11.8"
-jinja2 = "^3.1"
-tqdm = "^4.60"
+[project.optional-dependencies]
+gw = ["numpy-quaternion", "spherical-functions"]
+cachesim = ["pycachesim"]
 
-[tool.poetry.scripts]
+[project.scripts]
 dendro-build = "dendrosym.cli:main"
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[tool.setuptools.packages.find]
+include = ["dendrosym*"]
+
+[tool.setuptools.package-data]
+dendrosym = [
+    "templates/**/*",
+    "Lebedev/**/*",
+    "parameter_files/**/*",
+]

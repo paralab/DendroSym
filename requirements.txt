@@ -1,6 +1,0 @@
-matplotlib
-networkx
-sympy
-dill
-tomlkit
-cogapp

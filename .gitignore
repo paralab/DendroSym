@@ -144,3 +144,7 @@ cython_debug/
 .python-version
 
 *.png
+
+# Markdown is not committed by default (findings/, local AGENTS.md, scratch notes stay local).
+# Already-tracked .md files (README.md, etc.) are unaffected; to track a new one, `git add -f`.
+*.md
