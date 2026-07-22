@@ -192,9 +192,13 @@ unsigned int DISSIPATION_TYPE = 0;
 double {{ project_upper }}_CURRENT_MIN_DX = ({{ project_upper }}_COMPD_MAX[0] - {{ project_upper }}_COMPD_MIN[0]) *
                              (1.0 / (double)(1u << {{ project_upper }}_MAXDEPTH));
 
-// evolution constraint floors (for pos_floor constraints)
+// evolution constraint floors (for pos_floor constraints).
+// Independent per-variable floors, settable at runtime via [physics] <name>_floor.
+// Default 1e-4 for all (incl. alpha): the moving-puncture lapse must be allowed to
+// collapse toward 0 at a puncture, or the CCZ4 R/chi^2 source in Theta/Khat cannot be
+// regularized by the gauge -- see BSSN (floors alpha at CHI_FLOOR=1e-4).
 {% for vname in pos_floor_vars | default(['chi', 'alpha']) %}
-double {{ vname | upper }}_FLOOR = {% if vname | lower == 'alpha' %}0.1{% else %}1e-4{% endif %};
+double {{ vname | upper }}_FLOOR = 1e-4;
 {% endfor %}
 
 // initial data type (set from toml [initial_data] section)
@@ -491,6 +495,11 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
 {% else %}
     READ_OPTIONAL("physics", "{{ pvar.toml_key }}", {{ pvar.cpp_var }});
 {% endif %}
+{% endfor %}
+
+    // evolution constraint floors (optional; compiled defaults 1e-4)
+{% for vname in pos_floor_vars | default(['chi', 'alpha']) %}
+    READ_OPTIONAL("physics", "{{ vname | lower }}_floor", {{ vname | upper }}_FLOOR);
 {% endfor %}
 
     // =================================================================
