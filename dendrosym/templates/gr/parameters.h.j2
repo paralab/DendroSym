@@ -60,6 +60,15 @@ extern unsigned int {{ project_upper }}_BH2_MAX_LEV;
 extern double {{ project_upper }}_BH1_AMR_R;
 extern double {{ project_upper }}_BH2_AMR_R;
 extern double {{ project_upper }}_AMR_R_RATIO;
+// Radius of the ball around each puncture excluded from the *masked*
+// constraint norms reported by terminal_output(). 0 = no mask (default), which
+// leaves the reported norms exactly as they were. Set to 1.0 to reproduce
+// BSSN's convention (BSSN_BH1_CONSTRAINT_R), which is what makes a
+// like-for-like constraint comparison against BSSN possible: BSSN's
+// Hamiltonian constraint is non-finite at a puncture, so its norm is only
+// defined with the puncture excised.
+extern double {{ project_upper }}_BH1_CONSTRAINT_R;
+extern double {{ project_upper }}_BH2_CONSTRAINT_R;
 {% endif %}
 
 extern double {{ project_upper }}_CURRENT_RK_COORD_TIME;

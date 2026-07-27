@@ -756,6 +756,80 @@ int {{ project_upper }}Ctx::terminal_output() {
         DendroScalar *zippedCons[{{ constraint_num_vars }}];
         m_var[VL::CPU_CV].to_2d(zippedCons);
 
+{% if enable_bh_tracking %}
+        // Optional puncture excision for the constraint norms. Nodes within
+        // BH<n>_CONSTRAINT_R of a puncture are dropped from the *masked*
+        // norms. Both radii default to 0 -> mask inactive -> the unmasked
+        // norms below are reported exactly as before.
+        //
+        // Why this exists: BSSN's constraint norm
+        // (BSSN_GR/include/grUtils.tcc, computeConstraintL2Norm) excises a
+        // ball of radius BSSN_BH1_CONSTRAINT_R (production value 1.0) around
+        // each puncture, and it *must* -- BSSN's Hamiltonian constraint is
+        // non-finite at a puncture, so the unmasked norm is NaN. Our norms
+        // include the puncture, where essentially all of the violation lives.
+        // Comparing the two logs directly is therefore meaningless; setting
+        // constraint_r to BSSN's value makes rms_msk a like-for-like number.
+        const double bh1_cr = {{ namespace }}::{{ project_upper }}_BH1_CONSTRAINT_R;
+        const double bh2_cr = {{ namespace }}::{{ project_upper }}_BH2_CONSTRAINT_R;
+        const bool maskActive = (bh1_cr > 0.0 || bh2_cr > 0.0);
+
+        std::vector<double> consMask;
+        if (maskActive) {
+            // 1.0 = keep, 0.0 = excised. Built over the whole dof range; only
+            // the local slice is used below, so shared nodes can be written
+            // more than once without double counting.
+            consMask.resize(dof, 1.0);
+
+            const ot::TreeNode *pNodes = m_uiMesh->getAllElements().data();
+            const unsigned int *e2n_cg = &(*(m_uiMesh->getE2NMapping().begin()));
+            const unsigned int *e2n_dg = &(*(m_uiMesh->getE2NMapping_DG().begin()));
+            const unsigned int eleOrder = m_uiMesh->getElementOrder();
+            const unsigned int nPe = m_uiMesh->getNumNodesPerElement();
+            const unsigned int nodeLocalEnd = m_uiMesh->getNodeLocalEnd();
+
+            for (unsigned int elem = m_uiMesh->getElementLocalBegin();
+                 elem < m_uiMesh->getElementLocalEnd(); elem++) {
+                for (unsigned int k = 0; k < (eleOrder + 1); k++)
+                    for (unsigned int j = 0; j < (eleOrder + 1); j++)
+                        for (unsigned int i = 0; i < (eleOrder + 1); i++) {
+                            const unsigned int nIdx =
+                                k * (eleOrder + 1) * (eleOrder + 1) +
+                                j * (eleOrder + 1) + i;
+                            const unsigned int nodeLookUp_CG =
+                                e2n_cg[elem * nPe + nIdx];
+                            if (nodeLookUp_CG < nodeBegin ||
+                                nodeLookUp_CG >= nodeLocalEnd)
+                                continue;
+
+                            const unsigned int nodeLookUp_DG =
+                                e2n_dg[elem * nPe + nIdx];
+                            unsigned int ownerID, ii_x, jj_y, kk_z;
+                            m_uiMesh->dg2eijk(nodeLookUp_DG, ownerID, ii_x,
+                                              jj_y, kk_z);
+
+                            const double len = (double)(1u << (m_uiMaxDepth -
+                                pNodes[ownerID].getLevel()));
+                            const double xo =
+                                pNodes[ownerID].getX() + ii_x * (len / eleOrder);
+                            const double yo =
+                                pNodes[ownerID].getY() + jj_y * (len / eleOrder);
+                            const double zo =
+                                pNodes[ownerID].getZ() + kk_z * (len / eleOrder);
+
+                            const Point gp(GRIDX_TO_X(xo), GRIDY_TO_Y(yo),
+                                           GRIDZ_TO_Z(zo));
+                            const double d1 =
+                                (gp - {{ namespace }}::{{ project_upper }}_BH_LOC[0]).abs();
+                            const double d2 =
+                                (gp - {{ namespace }}::{{ project_upper }}_BH_LOC[1]).abs();
+                            if (d1 < bh1_cr || d2 < bh2_cr)
+                                consMask[nodeLookUp_CG] = 0.0;
+                        }
+            }
+        }
+{% endif %}
+
         // constraints -> 0 in the continuum, so RMS is the violation directly
         for (unsigned int v : termConsSel) {
             if (v >= {{ constraint_num_vars }}) continue;
@@ -766,12 +840,38 @@ int {{ project_upper }}Ctx::terminal_output() {
                 std::sqrt(calculateL2FullMeshIntegration(m_uiMesh, zippedCons[v]) *
                           invMeshVolume);
 
+{% if enable_bh_tracking %}
+            // sqrt(sum c^2 / N) over kept nodes -- same formula as normRMSE
+            // and as BSSN's computeConstraintL2Norm, just over the kept set.
+            double rms_msk = rms;
+            if (maskActive) {
+                double l_acc[2] = {0.0, 0.0};  // {sum c^2, kept-node count}
+                for (unsigned int n = 0; n < nLocal; n++) {
+                    if (consMask[nodeBegin + n] == 0.0) continue;
+                    const double c = zippedCons[v][nodeBegin + n];
+                    l_acc[0] += c * c;
+                    l_acc[1] += 1.0;
+                }
+                double g_acc[2] = {0.0, 0.0};
+                MPI_Allreduce(l_acc, g_acc, 2, MPI_DOUBLE, MPI_SUM, comm);
+                rms_msk = (g_acc[1] > 0.0)
+                              ? std::sqrt(g_acc[0] / g_acc[1])
+                              : 0.0;
+            }
+{% endif %}
+
             if (rank == 0) {
                 std::cout << "\t[con]:  " << std::setw(12)
                           << {{ project_upper }}_VAR_CONSTRAINT_NAMES[v]
+{% if enable_bh_tracking %}
+                          << " (min, max, rms, rms_vol, rms_msk) : \t ( "
+                          << l_min << ", " << l_max << ", " << rms << ", "
+                          << rms_vol << ", " << rms_msk << ") "
+{% else %}
                           << " (min, max, rms, rms_vol) : \t ( "
                           << l_min << ", " << l_max << ", " << rms << ", "
                           << rms_vol << ") "
+{% endif %}
                           << std::endl;
             }
         }

@@ -63,6 +63,10 @@ unsigned int {{ project_upper }}_BH2_MAX_LEV = 15;
 double {{ project_upper }}_BH1_AMR_R   = 1.0;
 double {{ project_upper }}_BH2_AMR_R   = 1.0;
 double {{ project_upper }}_AMR_R_RATIO = 1.618033988749895;
+// 0 = no puncture excision in the reported constraint norms (default; keeps
+// the norms byte-identical to before this was added). 1.0 matches BSSN.
+double {{ project_upper }}_BH1_CONSTRAINT_R = 0.0;
+double {{ project_upper }}_BH2_CONSTRAINT_R = 0.0;
 {% endif %}
 
 // Runtime state
@@ -528,6 +532,9 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
                     toml::find<unsigned int>(bh, "max_lev");
             if (bh.contains("amr_r"))
                 {{ project_upper }}_BH1_AMR_R = toml::find<double>(bh, "amr_r");
+            if (bh.contains("constraint_r"))
+                {{ project_upper }}_BH1_CONSTRAINT_R =
+                    toml::find<double>(bh, "constraint_r");
         }
         BH1 = BH(mass, bx, by, bz, vx, vy, vz, spin, spin_theta, spin_phi);
         {{ project_upper }}_BH_LOC[0] = Point(bx, by, bz);
@@ -545,6 +552,9 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
                     toml::find<unsigned int>(bh, "max_lev");
             if (bh.contains("amr_r"))
                 {{ project_upper }}_BH2_AMR_R = toml::find<double>(bh, "amr_r");
+            if (bh.contains("constraint_r"))
+                {{ project_upper }}_BH2_CONSTRAINT_R =
+                    toml::find<double>(bh, "constraint_r");
         }
         BH2 = BH(mass, bx, by, bz, vx, vy, vz, spin, spin_theta, spin_phi);
         {{ project_upper }}_BH_LOC[1] = Point(bx, by, bz);
