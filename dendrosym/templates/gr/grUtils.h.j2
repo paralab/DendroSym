@@ -31,6 +31,12 @@ void initDataFuncToPhysCoordsForMesh(const double xx, const double yy,
  * not the TPID solution.
  */
 void twoPuncturesInitEstimate(double x, double y, double z, double *var);
+
+/**@brief Position-dependent wavelet tolerance, selected by
+ * {{ project_upper }}_USE_WAVELET_TOL_FUNCTION. (x,y,z) are domain coords and hx the
+ * element spacing in domain units, as passed by Mesh::isReMeshUnzip.
+ */
+double computeWTolDCoords(double x, double y, double z, double *hx);
 {% endif %}
 
 {% if enable_analytical %}

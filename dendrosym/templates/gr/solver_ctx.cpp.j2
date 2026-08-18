@@ -898,8 +898,8 @@ bool {{ project_upper }}Ctx::is_remesh() {
         DendroScalar *unzipVar[{{ evolution_num_vars }}];
         m_var[VL::CPU_EV_UZ_IN].to_2d(unzipVar);
         std::function<double(double, double, double, double *)> wtolFn =
-            [](double, double, double, double *) {
-                return {{ project_upper }}_WAVELET_TOL;
+            [](double x, double y, double z, double *hx) {
+                return computeWTolDCoords(x, y, z, hx);
             };
         return m_uiMesh->isReMeshUnzip(
             (const DendroScalar **)unzipVar,
