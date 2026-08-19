@@ -830,6 +830,39 @@ int {{ project_upper }}Ctx::terminal_output() {
         }
 {% endif %}
 
+        // At a 2:1 jump the fine side comes from degree-(eleOrder)
+        // prolongation; a second derivative divides that by h^2, leaving those
+        // DOFs one order short of the interior scheme. rms_int drops them.
+        // Conservative: drops the whole element, not just the stencil radius.
+        std::vector<double> ifaceMask(dof, 1.0);
+        {
+            const ot::TreeNode *pN = m_uiMesh->getAllElements().data();
+            const unsigned int *e2n = &(*(m_uiMesh->getE2NMapping().begin()));
+            const unsigned int *e2e = &(*(m_uiMesh->getE2EMapping().begin()));
+            const unsigned int nDir = m_uiMesh->getNumDirections();
+            const unsigned int nPe_ = m_uiMesh->getNumNodesPerElement();
+            const unsigned int nEnd = m_uiMesh->getNodeLocalEnd();
+
+            // all elements, not just local: a node owned here can belong to a
+            // jump-adjacent element owned by another rank
+            for (unsigned int elem = m_uiMesh->getElementPreGhostBegin();
+                 elem < m_uiMesh->getElementPostGhostEnd(); elem++) {
+                const unsigned int lev = pN[elem].getLevel();
+                bool nearJump = false;
+                for (unsigned int d = 0; d < nDir && !nearJump; d++) {
+                    const unsigned int nb = e2e[elem * nDir + d];
+                    if (nb != LOOK_UP_TABLE_DEFAULT &&
+                        pN[nb].getLevel() != lev)
+                        nearJump = true;
+                }
+                if (!nearJump) continue;
+                for (unsigned int n = 0; n < nPe_; n++) {
+                    const unsigned int nd = e2n[elem * nPe_ + n];
+                    if (nd >= nodeBegin && nd < nEnd) ifaceMask[nd] = 0.0;
+                }
+            }
+        }
+
         // constraints -> 0 in the continuum, so RMS is the violation directly
         for (unsigned int v : termConsSel) {
             if (v >= {{ constraint_num_vars }}) continue;
@@ -860,17 +893,37 @@ int {{ project_upper }}Ctx::terminal_output() {
             }
 {% endif %}
 
+            // same formula again, additionally dropping the interface collar
+            double rms_int = 0.0;
+            {
+                double l_acc[2] = {0.0, 0.0};
+                for (unsigned int n = 0; n < nLocal; n++) {
+                    if (ifaceMask[nodeBegin + n] == 0.0) continue;
+{% if enable_bh_tracking %}
+                    if (maskActive && consMask[nodeBegin + n] == 0.0) continue;
+{% endif %}
+                    const double c = zippedCons[v][nodeBegin + n];
+                    l_acc[0] += c * c;
+                    l_acc[1] += 1.0;
+                }
+                double g_acc[2] = {0.0, 0.0};
+                MPI_Allreduce(l_acc, g_acc, 2, MPI_DOUBLE, MPI_SUM, comm);
+                rms_int = (g_acc[1] > 0.0)
+                              ? std::sqrt(g_acc[0] / g_acc[1])
+                              : 0.0;
+            }
+
             if (rank == 0) {
                 std::cout << "\t[con]:  " << std::setw(12)
                           << {{ project_upper }}_VAR_CONSTRAINT_NAMES[v]
 {% if enable_bh_tracking %}
-                          << " (min, max, rms, rms_vol, rms_msk) : \t ( "
+                          << " (min, max, rms, rms_vol, rms_msk, rms_int) : \t ( "
                           << l_min << ", " << l_max << ", " << rms << ", "
-                          << rms_vol << ", " << rms_msk << ") "
+                          << rms_vol << ", " << rms_msk << ", " << rms_int << ") "
 {% else %}
-                          << " (min, max, rms, rms_vol) : \t ( "
+                          << " (min, max, rms, rms_vol, rms_int) : \t ( "
                           << l_min << ", " << l_max << ", " << rms << ", "
-                          << rms_vol << ") "
+                          << rms_vol << ", " << rms_int << ") "
 {% endif %}
                           << std::endl;
             }
