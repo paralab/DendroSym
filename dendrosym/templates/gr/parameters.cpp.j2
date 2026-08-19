@@ -882,7 +882,12 @@ void dumpParamFile(std::ostream& sout, int root, MPI_Comm comm) {
 {% endfor %}
 
     sout << "\n[initial_data]" << std::endl;
-    sout << "id_type = " << {{ project_upper }}_ID_TYPE << std::endl;
+    sout << "id_type = " << {{ project_upper }}_ID_TYPE;
+{% for idt in initial_data_types | default([]) %}
+    if ({{ project_upper }}_ID_TYPE == {{ idt.id }})
+        sout << "   # {{ idt.name | replace('"', "'") }}{% if idt.note %} -- {{ idt.note | replace('"', "'") }}{% endif %}";
+{% endfor %}
+    sout << std::endl;
 
 {% if enable_bh_tracking %}
     for (int b = 0; b < 2; ++b) {
@@ -899,8 +904,9 @@ void dumpParamFile(std::ostream& sout, int root, MPI_Comm comm) {
              << ((b == 0) ? {{ project_upper }}_BH1_AMR_R : {{ project_upper }}_BH2_AMR_R)
              << std::endl;
         sout << "constraint_r = " << cr;
-        // 0 excludes no region, so the masked norm is not comparable to a BSSN log
-        if (cr <= 0.0) sout << "   # 0 = norms include the puncture";
+        if (cr <= 0.0)
+            sout << "   # 0 = norms include the puncture; BSSN uses 1.0, so rms"
+                    " is not comparable to a BSSN log";
         sout << std::endl;
     }
 {% endif %}
