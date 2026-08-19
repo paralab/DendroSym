@@ -794,16 +794,119 @@ void dumpParamFile(std::ostream& sout, int root, MPI_Comm comm) {
     MPI_Comm_rank(comm, &rank);
     if (rank != root) return;
 
-    sout << "# {{ project_upper }} Parameter Dump" << std::endl;
-    sout << "[solver]" << std::endl;
-    sout << "maxdepth = " << {{ project_upper }}_MAXDEPTH << std::endl;
+    // Dumps parsed in-memory values, not the par file, so a silently-kept
+    // compiled default is visible in the log.
+    const std::streamsize old_prec = sout.precision();
+    sout << std::setprecision(17);
+
+    auto arr = [&sout](const char* name, const auto* a, std::size_t n) {
+        sout << name << " = [";
+        for (std::size_t i = 0; i < n; ++i)
+            sout << a[i] << (i + 1 < n ? ", " : "");
+        sout << "]" << std::endl;
+    };
+
+    sout << "# ==== {{ project_upper }} parameter dump (parsed values, not the par file) ===="
+         << std::endl;
+
+    sout << "\n[solver]" << std::endl;
+    sout << "dim = " << {{ project_upper }}_DIM << std::endl;
     sout << "ele_order = " << {{ project_upper }}_ELE_ORDER << std::endl;
+    sout << "padding_width = " << {{ project_upper }}_PADDING_WIDTH << std::endl;
+    sout << "maxdepth = " << {{ project_upper }}_MAXDEPTH << std::endl;
+    sout << "mindepth = " << {{ project_upper }}_MINDEPTH << std::endl;
+    arr("compd_min", {{ project_upper }}_COMPD_MIN, 3);
+    arr("compd_max", {{ project_upper }}_COMPD_MAX, 3);
+    arr("octree_min", {{ project_upper }}_OCTREE_MIN, 3);
+    arr("octree_max", {{ project_upper }}_OCTREE_MAX, 3);
+    sout << "enable_block_adaptivity = " << {{ project_upper }}_ENABLE_BLOCK_ADAPTIVITY
+         << std::endl;
     sout << "rk_type = " << {{ project_upper }}_RK_TYPE << std::endl;
+    sout << "rk_time_begin = " << {{ project_upper }}_RK_TIME_BEGIN << std::endl;
+    sout << "rk_time_end = " << {{ project_upper }}_RK_TIME_END << std::endl;
     sout << "rk45_time_step_size = " << {{ project_upper }}_RK45_TIME_STEP_SIZE << std::endl;
-    sout << std::endl;
-    sout << "[dissipation]" << std::endl;
+    sout << "rk45_desired_tol = " << {{ project_upper }}_RK45_DESIRED_TOL << std::endl;
+    sout << "cfl_factor = " << {{ project_upper }}_CFL_FACTOR << std::endl;
+    sout << "io_output_freq = " << {{ project_upper }}_IO_OUTPUT_FREQ << std::endl;
+    sout << "time_step_output_freq = " << {{ project_upper }}_TIME_STEP_OUTPUT_FREQ
+         << std::endl;
+    sout << "checkpt_freq = " << {{ project_upper }}_CHECKPT_FREQ << std::endl;
+    sout << "restore_solver = " << {{ project_upper }}_RESTORE_SOLVER << std::endl;
+    sout << "dendro_grain_sz = " << {{ project_upper }}_DENDRO_GRAIN_SZ << std::endl;
+    sout << "dendro_amr_fac = " << {{ project_upper }}_DENDRO_AMR_FAC << std::endl;
+    sout << "load_imb_tol = " << {{ project_upper }}_LOAD_IMB_TOL << std::endl;
+    sout << "async_comm_k = " << {{ project_upper }}_ASYNC_COMM_K << std::endl;
+    sout << "init_grid_iter = " << {{ project_upper }}_INIT_GRID_ITER << std::endl;
+    sout << "remesh_test_freq = " << {{ project_upper }}_REMESH_TEST_FREQ << std::endl;
+    sout << "num_refine_vars = " << {{ project_upper }}_NUM_REFINE_VARS << std::endl;
+
+    sout << "\n[refinement]" << std::endl;
+    sout << "mode = " << static_cast<unsigned int>({{ project_upper }}_REFINEMENT_MODE)
+         << "   # 0=WAMR 1=EH 2=EH_WAMR 3=BH_LOC 4=BH_WAMR" << std::endl;
+    sout << "wavelet_tol = " << {{ project_upper }}_WAVELET_TOL << std::endl;
+    sout << "wavelet_tol_max = " << {{ project_upper }}_WAVELET_TOL_MAX << std::endl;
+    sout << "use_wavelet_tol_function = " << {{ project_upper }}_USE_WAVELET_TOL_FUNCTION
+         << std::endl;
+    sout << "wavelet_tol_function_r0 = " << {{ project_upper }}_WAVELET_TOL_FUNCTION_R0
+         << std::endl;
+    sout << "wavelet_tol_function_r1 = " << {{ project_upper }}_WAVELET_TOL_FUNCTION_R1
+         << std::endl;
+    sout << "amr_r_ratio = " << {{ project_upper }}_AMR_R_RATIO << std::endl;
+
+    sout << "\n[dissipation]" << std::endl;
     sout << "ko_diss_sigma = " << KO_DISS_SIGMA << std::endl;
-    // TODO: dump all parameters
+    sout << "use_const_ko = " << USE_CONST_KO << std::endl;
+    sout << "dissipation_type = " << DISSIPATION_TYPE << std::endl;
+
+{% if use_dendro_derivs %}
+    sout << "\n[derivatives]" << std::endl;
+    sout << "type_first = \"" << {{ project_upper }}_DERIVTYPE_FIRST << "\"" << std::endl;
+    sout << "type_second = \"" << {{ project_upper }}_DERIVTYPE_SECOND << "\"" << std::endl;
+{% endif %}
+
+    // [physics]: generated from the equation config's ParameterVariables, so a
+    // system's own parameters appear here without touching this template.
+    sout << "\n[physics]" << std::endl;
+{% for pvar in physics_params | default([]) %}
+{% if pvar.num_params > 1 %}
+    arr("{{ pvar.toml_key }}", {{ pvar.cpp_var }}, {{ pvar.num_params }});
+{% else %}
+    sout << "{{ pvar.toml_key }} = " << {{ pvar.cpp_var }} << std::endl;
+{% endif %}
+{% if pvar.description and not pvar.description.startswith("Parameter: ") %}
+    sout << "#   {{ pvar.description | replace('"', "'") }}" << std::endl;
+{% endif %}
+{% endfor %}
+{% for vname in pos_floor_vars | default(['chi', 'alpha']) %}
+    sout << "{{ vname | lower }}_floor = " << {{ vname | upper }}_FLOOR << std::endl;
+{% endfor %}
+
+    sout << "\n[initial_data]" << std::endl;
+    sout << "id_type = " << {{ project_upper }}_ID_TYPE << std::endl;
+
+{% if enable_bh_tracking %}
+    for (int b = 0; b < 2; ++b) {
+        const double cr =
+            (b == 0) ? {{ project_upper }}_BH1_CONSTRAINT_R : {{ project_upper }}_BH2_CONSTRAINT_R;
+        sout << "\n[bh" << (b + 1) << "]" << std::endl;
+        sout << "loc = [" << {{ project_upper }}_BH_LOC[b].x() << ", "
+             << {{ project_upper }}_BH_LOC[b].y() << ", "
+             << {{ project_upper }}_BH_LOC[b].z() << "]" << std::endl;
+        sout << "max_lev = "
+             << ((b == 0) ? {{ project_upper }}_BH1_MAX_LEV : {{ project_upper }}_BH2_MAX_LEV)
+             << std::endl;
+        sout << "amr_r = "
+             << ((b == 0) ? {{ project_upper }}_BH1_AMR_R : {{ project_upper }}_BH2_AMR_R)
+             << std::endl;
+        sout << "constraint_r = " << cr;
+        // 0 excludes no region, so the masked norm is not comparable to a BSSN log
+        if (cr <= 0.0) sout << "   # 0 = norms include the puncture";
+        sout << std::endl;
+    }
+{% endif %}
+
+    sout << "\n# ==== end parameter dump ====" << std::endl;
+    sout << std::setprecision(old_prec);
 }
 
 }  // namespace {{ namespace }}
