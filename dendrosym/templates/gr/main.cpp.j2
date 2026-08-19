@@ -70,6 +70,8 @@ int main(int argc, char **argv) {
         std::cout << GRN << "========================================" << NRM << std::endl;
     }
 
+    {{ namespace }}::dumpParamFile(std::cout, 0, comm);
+
     // mesh generation
     _InitializeHcurve({{ namespace }}::{{ project_upper }}_DIM);
 
@@ -196,6 +198,9 @@ int main(int argc, char **argv) {
             {{ namespace }}::{{ project_upper }}_DENDRO_GRAIN_SZ,
             {{ namespace }}::{{ project_upper }}_LOAD_IMB_TOL,
             {{ namespace }}::{{ project_upper }}_SPLIT_FIX);
+        // Redundant today (ets->init() re-enters initialize()), but that is an
+        // implicit dependency on dendrolib's ETS. Does not touch hanging nodes.
+        ctx->init_grid();
     }
 
     // keep the local mesh pointer current: init_grid_iter (or a checkpoint
