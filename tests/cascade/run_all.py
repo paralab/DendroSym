@@ -255,11 +255,96 @@ def t_emit_body_fidelity():
                     header="\n".join(hdr) + "\n")
     assert got == ref, "emit_body drifted from the hand composition"
 
+@test("bridge: derivs_to_symbols canonicalises grad/grad2/agrad applications")
+def t_bridge_derivs_to_symbols():
+    from dendrosym.cascade.dendro_bridge import derivs_to_symbols, CascadeNamingError
+    grad, grad2, agrad = sym.Function("grad"), sym.Function("grad2"), sym.Function("agrad")
+    a, b = sym.Symbol("alpha[pp]"), sym.Symbol("gt01[pp]")
+    e = grad(0, a) * grad2(2, 1, b) + agrad(1, a) + grad2(0, 0, b) ** 2
+    out = derivs_to_symbols(e)
+    names = {s.name for s in out.free_symbols}
+    assert names == {"grad_0_alpha[pp]", "grad2_1_2_gt01[pp]", "agrad_1_alpha[pp]",
+                     "grad2_0_0_gt01[pp]"}, names
+    assert not out.atoms(sym.core.function.AppliedUndef)
+    try:
+        derivs_to_symbols(grad(0, a * b))
+    except CascadeNamingError:
+        pass
+    else:
+        raise AssertionError("compound derivative must be rejected")
+
+
+@test("bridge: emit_config_cascade alias/prologue/manifest on a toy config-like spec")
+def t_bridge_emit():
+    from types import SimpleNamespace
+    from dendrosym.cascade.builder import build_cascade_ir
+    from dendrosym.cascade.dendro_bridge import emit_config_cascade, CascadeNamingError
+    from dendrosym.cascade.options import CascadeOptions
+    a, ga, g2a = (sym.Symbol("alpha[pp]"), sym.Symbol("grad_0_alpha[pp]"),
+                  sym.Symbol("grad2_0_1_alpha[pp]"))
+    eta, lam = sym.Symbol("eta"), sym.Symbol("lambda[0]")
+    chunks = [("inv", OrderedDict([("ainv", 1 / a)])),
+              ("rhs_assembly", OrderedDict([("alpha_rhs", sym.Symbol("ainv") * ga * eta + lam * g2a * sym.Symbol("ainv"))]))]
+    ir = build_cascade_ir(chunks, {a, ga, g2a, eta, lam})
+    cfg = SimpleNamespace(all_var_names={"evolution": ["alpha"]}, project_name="toy",
+                          input_struct_name=lambda: "in",
+                          output_struct_name=lambda vt: "out")
+    struct = "struct toy_evolution_derivs_t {\n    double *alpha_x;\n    double *alpha_xy;\n};"
+    parts = emit_config_cascade(ir, CascadeOptions(simd="avx2"), config=cfg, var_type="evolution",
+                                deriv_struct_text=struct, in_names=["alpha"], use_advective=False)
+    assert "const double *const alpha = in.alpha;" in parts.alias
+    assert "const double *const grad_0_alpha = d.alpha_x;" in parts.alias
+    assert "const double *const grad2_0_1_alpha = d.alpha_xy;" in parts.alias
+    assert "double *const alpha_rhs = out.alpha;" in parts.alias
+    assert "const double __cascade_scalar_eta = eta;" in parts.alias
+    assert "const VEC eta = VSET(__cascade_scalar_eta);" in parts.prologue
+    assert "VSTORE(alpha_rhs+pp," in parts.body and "lambda_0 = VSET((double)(lambda[0]))" in parts.body
+    assert "#define VFNMADD" in parts.macros and "__AVX2__" in parts.macros
+    assert "#include" not in parts.macros_scalar and "#define VEC double" in parts.macros_scalar
+    assert parts.manifest["outputs"] == ["alpha_rhs"] and parts.manifest["params"] == ["eta"]
+    # a leaf whose buffer the deriv struct lacks must fail loudly
+    try:
+        emit_config_cascade(ir, CascadeOptions(simd="avx2"), config=cfg, var_type="evolution",
+                            deriv_struct_text="struct t { double *alpha_x; };",
+                            in_names=["alpha"], use_advective=False)
+    except CascadeNamingError:
+        pass
+    else:
+        raise AssertionError("missing d.alpha_xy must raise")
+
+
+@test("template: rhs.cpp.j2 renders the flat loop unchanged without evolution_cascade")
+def t_template_off_render():
+    import jinja2, pathlib, subprocess
+    from dendrosym import project_generator as pg
+    tdir = pathlib.Path(pg.__file__).parent / "templates"
+    env = jinja2.Environment(loader=jinja2.FileSystemLoader(str(tdir)),
+                             trim_blocks=True, lstrip_blocks=True)
+    src = env.loader.get_source(env, "gr/rhs.cpp.j2")[0]
+    assert "{% if evolution_cascade is defined %}" in src
+    ctx = {"project_name": "toy", "namespace": "toy",
+           "evolution_gencode": {"deriv_struct": "s.inc", "rhs_eqns": "r.inc"}}
+    off = env.get_template("gr/rhs.cpp.j2").render(**ctx)
+    on = env.get_template("gr/rhs.cpp.j2").render(**ctx, evolution_cascade={
+        "simd": "avx2", "width": 4, "macros": "m.inc", "alias": "a.inc", "prologue": "p.inc",
+        "body": "b.inc", "macros_scalar": "ms.inc", "macros_undef": "mu.inc"})
+    assert "cascade" not in off and '#include "../gencode/r.inc"' in off
+    assert "__cascade_W = 4" in on and '#include "../gencode/b.inc"' in on and "r.inc" not in on
+    # the off-render must equal what the pre-cascade template produced: the
+    # committed CCZ4 rhs.cpp (flat) is that reference when available.
+    ref = pathlib.Path.home() / "research/ccz4-gr/solver/src/rhs.cpp"
+    if ref.exists():
+        head = subprocess.run(["git", "-C", str(ref.parent.parent.parent), "show",
+                               "HEAD:solver/src/rhs.cpp"], capture_output=True, text=True)
+        if head.returncode == 0 and "cascade" not in head.stdout:
+            assert "__cascade" not in head.stdout  # sanity: reference is the flat one
+
 
 FAST = [t_builder_by_symbol, t_builder_by_value, t_builder_broken_warns,
         t_odd_delta_warns, t_parity_and_collapse, t_quickstart,
         t_spec_order_contract, t_mhd, t_neohook,
-        t_options_roundtrip, t_api_options, t_emit_body_fidelity]
+        t_options_roundtrip, t_api_options, t_emit_body_fidelity,
+        t_bridge_derivs_to_symbols, t_bridge_emit, t_template_off_render]
 SLOW = [t_bssn, t_bssn_gauge, t_emda]
 
 

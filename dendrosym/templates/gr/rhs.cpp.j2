@@ -63,6 +63,10 @@ void {{ project_name }}RHS(double **uzipVarsRHS, const double **uZipVars,
 {% if evolution_gencode is defined and evolution_gencode.deriv_struct is defined %}
 #include "../gencode/{{ evolution_gencode.deriv_struct }}"
 {% endif %}
+{% if evolution_cascade is defined %}
+// polynomial-cascade SIMD kernel: macro set ({{ evolution_cascade.simd }}, {{ evolution_cascade.width }} lanes)
+#include "../gencode/{{ evolution_cascade.macros }}"
+{% endif %}
 
 void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
              const unsigned int &offset, const double *pmin, const double *pmax,
@@ -141,6 +145,57 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
     // this is where the generated equations live. the included file has
     // all the CSE-optimized code with DENDRO_nnnn temporaries.
     {{ namespace }}::timer::t_rhs.start();
+{% if evolution_cascade is defined %}
+    {
+        // -- polynomial cascade RHS ({{ evolution_cascade.simd }}, {{ evolution_cascade.width }} lanes) --
+        // the body is the cascade engine's VEC kernel; the alias table maps its
+        // bare names onto in./d./out.; rows are walked W points at a time with a
+        // shift-back tail (overlap recomputed, deterministic per pp). Blocks whose
+        // interior row is narrower than W run the same body at width 1.
+#include "../gencode/{{ evolution_cascade.alias }}"
+        constexpr unsigned int __cascade_W = {{ evolution_cascade.width }};
+        const unsigned int __cascade_i_lo = PW;
+        const unsigned int __cascade_i_hi = nx - PW;
+        if (__cascade_i_hi >= __cascade_i_lo + __cascade_W) {
+            for (unsigned int k = PW; k < nz - PW; k++) {
+                for (unsigned int j = PW; j < ny - PW; j++) {
+                    unsigned int i = __cascade_i_lo;
+                    for (; i + __cascade_W <= __cascade_i_hi; i += __cascade_W) {
+                        const unsigned int __cascade_i0 = i;
+                        const unsigned int pp = __cascade_i0 + nx * (j + ny * k);
+#include "../gencode/{{ evolution_cascade.prologue }}"
+                        {
+#include "../gencode/{{ evolution_cascade.body }}"
+                        }
+                    }
+                    if (i < __cascade_i_hi) {
+                        const unsigned int __cascade_i0 = __cascade_i_hi - __cascade_W;
+                        const unsigned int pp = __cascade_i0 + nx * (j + ny * k);
+#include "../gencode/{{ evolution_cascade.prologue }}"
+                        {
+#include "../gencode/{{ evolution_cascade.body }}"
+                        }
+                    }
+                }
+            }
+        } else {
+#include "../gencode/{{ evolution_cascade.macros_scalar }}"
+            for (unsigned int k = PW; k < nz - PW; k++) {
+                for (unsigned int j = PW; j < ny - PW; j++) {
+                    for (unsigned int i = __cascade_i_lo; i < __cascade_i_hi; i++) {
+                        const unsigned int __cascade_i0 = i;
+                        const unsigned int pp = __cascade_i0 + nx * (j + ny * k);
+#include "../gencode/{{ evolution_cascade.prologue }}"
+                        {
+#include "../gencode/{{ evolution_cascade.body }}"
+                        }
+                    }
+                }
+            }
+        }
+#include "../gencode/{{ evolution_cascade.macros_undef }}"
+    }
+{% else %}
     for (unsigned int k = PW; k < nz - PW; k++) {
         for (unsigned int j = PW; j < ny - PW; j++) {
             for (unsigned int i = PW; i < nx - PW; i++) {
@@ -157,6 +212,7 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
             }
         }
     }
+{% endif %}
     {{ namespace }}::timer::t_rhs.stop();
 
     // -- deallocate intermediate derivatives --

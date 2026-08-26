@@ -18,6 +18,32 @@ File: `{{ project_name }}.py`
 Edit `{{ project_name }}_parameters.sample.toml` (copy it per run): resolution,
 domain, CFL, IO/checkpoint frequency, refinement mode, RK type, BH params.
 
+## SIMD cascade RHS kernel (opt-in, no physics change)
+The evolution RHS can also be emitted as a *polynomial-cascade* kernel: the
+config's own named tensors (inverse metric, Christoffels, Ricci, ...) become
+ordered layers, each CSE'd separately, emitted as an AVX2/AVX-512 VEC body that
+`rhs.cpp` walks 4/8 points at a time. Same equations, same derivatives, same
+KO/BCs; only the kernel structure differs (per-layer CSE + SIMD; agreement with
+the flat kernel is ~1e-16 relative).
+
+- **Register** (once, in `{{ project_name }}.py`): a layer spec + defaults
+  `dendroConfigs.set_cascade_spec_function("evolution", build_specs,
+  options=CascadeOptions(enabled=False, simd="avx2"))`.
+- **Emit**: `python {{ project_name }}.py --cascade` (or flip `enabled=True`).
+  Override any knob from the command line: `--cascade-simd avx512`,
+  `--cascade-L 7`, `--cascade-no-fma-tree`, `--cascade-inline-threshold 0`,
+  `--cascade-global-cse` ... (`python {{ project_name }}.py --help`).
+  `--no-cascade` returns to the flat kernel. The flat `*_rhs_eqns.cpp.inc` is
+  always generated too, so switching back never regenerates.
+- **Check**: `python -m dendrosym.cascade.dendro_bridge --harness
+  solver/gencode/{{ project_name }}_evolution_cascade_manifest.json --run`
+  compiles a flat-vs-cascade comparison on random data (tolerance 1e-12).
+- **Cache caveat**: the gencode cache keys on the equations + cascade options,
+  not on the spec function's body. After editing `build_specs` itself, run once
+  with `DENDRO_NO_GENCODE_CACHE=1`.
+- Build with `-mavx2 -mfma` (AVX-512: `-mavx512f`) — `CPU_ARCH` in
+  `CMakeLists.txt`; the generated macro file `#error`s otherwise.
+
 ## Hooks you can hand-edit
 | Want to… | Go to |
 |---|---|

@@ -89,6 +89,13 @@ class DendroConfiguration:
 
         self.stored_staged_exprs = {}
 
+        # opt-in polynomial-cascade kernels, keyed by var_type:
+        #   var_type -> (spec_func, CascadeOptions)
+        # When registered AND enabled, the generator ALSO emits a layered SIMD
+        # kernel (dendrosym.cascade.dendro_bridge) next to the flat RHS; the
+        # flat path itself is untouched. Empty => flat only (default).
+        self.stored_cascade_specs = {}
+
         # by default we want to replace and or expand the derivatives
         self.replace_and_expand_derivatives = True
 
@@ -697,6 +704,35 @@ class DendroConfiguration:
         if var_type == "parameter":
             raise ValueError("Cannot set staged function to parameters")
         self.stored_staged_exprs[var_type] = staged_func
+
+    def set_cascade_spec_function(self, var_type: str, spec_func, options=None):
+        """Register a polynomial-cascade layer spec for a var_type.
+
+        ``spec_func(rhs_pairs)`` receives the flat ``[(name_rhs, expr), ...]``
+        list and returns ``(chunks, leaves)``: the config's named tensor layers
+        in evaluation order, the LAST being the RHS assembly (see
+        dendrosym.cascade.dendro_bridge). ``options`` is a
+        dendrosym.cascade.CascadeOptions (simd, L, fma_tree, ...); its
+        ``enabled`` flag (and ``dendrosym.run --cascade/--no-cascade``) decides
+        whether the kernel is emitted. Flat gencode is never affected.
+        """
+        if var_type == "parameter":
+            raise ValueError("Cannot set cascade spec to parameters")
+        from dendrosym.cascade.options import CascadeOptions
+        self.stored_cascade_specs[var_type] = (spec_func, options or CascadeOptions())
+
+    def cascade_spec(self, var_type: str):
+        """``(spec_func, options)`` when a cascade is registered AND enabled, else None."""
+        entry = getattr(self, "stored_cascade_specs", {}).get(var_type)
+        if entry is None or not entry[1].enabled:
+            return None
+        return entry
+
+    def override_cascade(self, **changes):
+        """Apply CascadeOptions field overrides to every registered spec
+        (used by ``dendrosym.run`` for the --cascade-* command-line flags)."""
+        for vt, (fn, opts) in list(getattr(self, "stored_cascade_specs", {}).items()):
+            self.stored_cascade_specs[vt] = (fn, opts.replace(**changes))
 
     def set_rhs_equation_function(
         self, var_type: str, rhs_func, override_checks: bool = False

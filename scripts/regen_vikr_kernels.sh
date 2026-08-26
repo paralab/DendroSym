@@ -15,13 +15,16 @@
 set -e
 VIKR=${VIKR:-$HOME/research/vikr}
 PYTHON=${PYTHON:-python3}
-OUT=${1:-${TMPDIR:-/tmp}/cascade_regen}
+OUT=$(realpath -m "${1:-${TMPDIR:-/tmp}/cascade_regen}")
 export PYTHONHASHSEED=0
 BSSN="$PYTHON -m dendrosym.cascade.systems.bssn.emit"
 LOOPED="$PYTHON -m dendrosym.cascade.systems.bssn.looped"
 EMDA="$PYTHON -m dendrosym.cascade.systems.emda.cascade"
 G=$OUT/bssn; E=$OUT/emda
 rm -rf "$G" "$E"; mkdir -p "$G" "$E"
+# run from OUT: importing emda-gr's emdabssn_eqns_configs writes
+# EMDA_GENCODE_constraints.cpp into the cwd (external module-level side effect).
+cd "$OUT"
 $PYTHON -c "import sympy; assert sympy.__version__=='1.13.3', sympy.__version__"
 
 # SCALAR kernels: --inline-threshold 0 EXPLICITLY (see vikr script for the measurement).

@@ -64,20 +64,56 @@ def run(config, default_output_dir=None, argv=None):
     Recognized argv flags:
         --skip-gencode    skip the expensive CSE/equation-printing pass
         --gencode-only    only emit gencode .cpp.inc files
+        --cascade / --no-cascade
+                          emit (or suppress) the polynomial-cascade SIMD kernel for
+                          every var_type with a registered spec
+                          (config.set_cascade_spec_function); flags win over the
+                          options the config script registered
+        --cascade-<knob>  override one CascadeOptions field, e.g. --cascade-simd
+                          avx512 --cascade-L 7 --cascade-no-fma-tree (see
+                          dendrosym.cascade.CascadeOptions; --help lists them)
         <positional>      output directory (defaults to caller's __file__ dir)
     """
+    import argparse
     import os
     import sys
 
     if argv is None:
         argv = sys.argv[1:]
 
-    skip = "--skip-gencode" in argv
-    gencode_only = "--gencode-only" in argv
-    positional = [a for a in argv if not a.startswith("--")]
+    ap = argparse.ArgumentParser(
+        prog=os.path.basename(sys.argv[0]) or "dendrosym.run",
+        description=f"generate the {config.project_name} solver")
+    ap.add_argument("output_dir", nargs="?", default=None)
+    ap.add_argument("--skip-gencode", action="store_true")
+    ap.add_argument("--gencode-only", action="store_true")
+    ap.add_argument("--cascade", dest="cascade", action="store_true", default=None,
+                    help="emit the polynomial-cascade kernel (registered specs)")
+    ap.add_argument("--no-cascade", dest="cascade", action="store_false")
+    from dendrosym.cascade.options import CascadeOptions
+    CascadeOptions.add_argparse_args(ap, prefix="cascade-")
+    ns, unknown = ap.parse_known_args(argv)
+    if unknown:
+        print(f"dendrosym.run: ignoring unrecognized arguments {unknown}", file=sys.stderr)
 
-    if positional:
-        output_dir = positional[0]
+    skip = ns.skip_gencode
+    gencode_only = ns.gencode_only
+
+    # cascade overrides: CLI flags layer over whatever the config script registered
+    if hasattr(config, "override_cascade"):
+        specs = getattr(config, "stored_cascade_specs", {})
+        changes = {}
+        for vt, (fn, opts) in list(specs.items()):
+            new = CascadeOptions.from_namespace(ns, prefix="cascade-", base=opts)
+            if ns.cascade is not None:
+                new = new.replace(enabled=ns.cascade)
+            specs[vt] = (fn, new)
+        if ns.cascade and not specs:
+            print("dendrosym.run: --cascade given but the config registered no cascade "
+                  "spec (set_cascade_spec_function)", file=sys.stderr)
+
+    if ns.output_dir:
+        output_dir = ns.output_dir
     elif default_output_dir is not None:
         output_dir = default_output_dir
     else:

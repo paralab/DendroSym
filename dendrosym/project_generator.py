@@ -117,6 +117,13 @@ def _vt_cache_key(config, vt):
     # that never stage.
     if not getattr(config, "replace_and_expand_derivatives", True):
         parts.append("staged_compound_derivs")
+    # a registered+enabled cascade ADDS kernel files for the same equations, so
+    # it keys distinctly (options + bridge version). Solvers without one keep
+    # their existing keys (golden cache-hits intact).
+    spec = config.cascade_spec(vt) if hasattr(config, "cascade_spec") else None
+    if spec is not None:
+        from dendrosym.cascade.dendro_bridge import CASCADE_BRIDGE_VERSION
+        parts.append(CASCADE_BRIDGE_VERSION + "|" + spec[1].cache_key())
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
@@ -147,13 +154,16 @@ def _try_cache_hit(vt, vt_hash, gencode_dir, prefix):
             return None
         dst = gencode_dir / fname
         shutil.copyfile(src, dst)
-    return {
+    hit = {
         f"{vt}_gencode": gencode_filenames,
         f"{vt}_bcs_code": meta.get("bcs_code", ""),
         f"{vt}_ko_code": meta.get("ko_code", ""),
         f"{vt}_deriv_struct_name": meta.get("deriv_struct_name", ""),
         f"{vt}_num_derivs": meta.get("num_derivs", 0),
     }
+    if meta.get("cascade"):
+        hit[f"{vt}_cascade"] = meta["cascade"]
+    return hit
 
 
 def _save_cache(vt, vt_hash, gencode_dir, ctx_update):
@@ -172,6 +182,8 @@ def _save_cache(vt, vt_hash, gencode_dir, ctx_update):
         "deriv_struct_name": ctx_update.get(f"{vt}_deriv_struct_name", ""),
         "num_derivs": ctx_update.get(f"{vt}_num_derivs", 0),
     }
+    if ctx_update.get(f"{vt}_cascade"):
+        meta["cascade"] = ctx_update[f"{vt}_cascade"]
     (cache_root / "meta.json").write_text(json.dumps(meta))
 
 
@@ -315,6 +327,28 @@ def _run_var_type(args):
     rhs_file = f"{prefix}_{vt}_rhs_eqns.cpp.inc"
     (gencode_dir / rhs_file).write_text(rhs_code)
 
+    # optional polynomial-cascade kernel (registered + enabled on the config):
+    # the same equations as a layered VEC body + wrapper adapter files. The
+    # body is what the cascade engine emits; the naming passes above are NOT
+    # applied to it (they would corrupt v_grad_0_X tokens) -- the alias table
+    # maps names onto in./d./out. instead. Buffers come from the deriv pass
+    # above (the cascade only reads derivatives present in the RHS).
+    cascade_files = {}
+    cascade_update = {}
+    spec = config.cascade_spec(vt) if hasattr(config, "cascade_spec") else None
+    if spec is not None:
+        print(f"    generating cascade kernel ({spec[1].simd})...", file=sys.stderr)
+        from dendrosym.cascade import dendro_bridge as _cb
+        spec_func, copts = spec
+        ir = _cb.build_config_cascade(config, vt, spec_func, copts)
+        parts = _cb.emit_config_cascade(
+            ir, copts, config=config, var_type=vt, deriv_struct_text=deriv_struct,
+            in_names=_in_names, use_advective=use_advective,
+            staged_names=staged_names, project_name=prefix,
+        )
+        cascade_files = _cb.write_cascade_files(gencode_dir, prefix, vt, parts)
+        cascade_update[f"{vt}_cascade"] = _cb.cascade_ctx(cascade_files, copts)
+
     print(f"    generating BCS code...", file=sys.stderr)
     try:
         bcs_code = config.generate_bcs_calculations(vt)
@@ -345,11 +379,14 @@ def _run_var_type(args):
             "intermediate_grad": intermediate_file,
             "intermediate_grad_dealloc": intermediate_dealloc_file,
             "rhs_eqns": rhs_file,
+            # cascade files ride the same cache copy (empty when no cascade)
+            **{f"cascade_{k}": v for k, v in cascade_files.items()},
         },
         f"{vt}_deriv_struct_name": deriv_struct_name,
         f"{vt}_num_derivs": num_derivs,
         f"{vt}_bcs_code": bcs_code,
         f"{vt}_ko_code": ko_code,
+        **cascade_update,
     }
 
 
@@ -418,6 +455,12 @@ class DendroProjectGenerator:
                     "rhs_eqns": f"{prefix}_{vt}_rhs_eqns.cpp.inc",
                     "ko_deriv_calc": f"{prefix}_{vt}_ko_deriv_calc.cpp.inc",
                 }
+                spec = (self.config.cascade_spec(vt)
+                        if hasattr(self.config, "cascade_spec") else None)
+                if spec is not None:
+                    from dendrosym.cascade import dendro_bridge as _cb
+                    ctx[f"{vt}_cascade"] = _cb.cascade_ctx(
+                        _cb.cascade_filenames(prefix, vt), spec[1])
 
         if not gencode_only:
             # 3. Render templates -> src/ and include/
