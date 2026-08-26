@@ -8,10 +8,8 @@ import argparse
 import os
 import sys
 
-from dendrosym.cascade.emit import (
-    _inline_low_use_temps, _classify_leaves, _emit_avx_prologue,
-    _emit_avx_chunks, _emit_avx_global_cse, _lazy_reorder,
-)
+from dendrosym.cascade.emit import emit_body
+from dendrosym.cascade.options import CascadeOptions
 
 
 def emit_bssn_ir_avx2(target_L=None, verbose=False, fold_vfma_passes: int = 0,
@@ -47,10 +45,6 @@ def emit_bssn_ir_avx2(target_L=None, verbose=False, fold_vfma_passes: int = 0,
                       target_L=target_L, smart_split=smart_split,
                       gauge=gauge, ssl=ssl, cahd=cahd, eta_mode=eta_mode,
                       verbose=verbose)
-    if inline_threshold > 0:
-        result = _inline_low_use_temps(result, threshold=inline_threshold)
-    leaves = _classify_leaves(result, fused=fused)
-
     L = len(result.chunks)
     if L == 7:
         kind = "natural"
@@ -75,18 +69,10 @@ def emit_bssn_ir_avx2(target_L=None, verbose=False, fold_vfma_passes: int = 0,
             "// FUSED: 1st/pure-2nd derivs inlined as stencils; wrapper runs "
             "mixed-2nd-only pre-pass; interior-only (bflag==0).")
     lines.append("")
-    lines += _emit_avx_prologue(leaves)
-    if global_cse:
-        lines += _emit_avx_global_cse(result, leaves, fma=fma_tree, split=fma_split)
-    else:
-        lines += _emit_avx_chunks(result, leaves, fma=fma_tree, split=fma_split)
-    if lazy_prologue:
-        lines = _lazy_reorder(lines)
-    text = "\n".join(lines) + "\n"
-    if fold_vfma_passes > 0:
-        from dendrosym.cascade.vec_printer import fold_vfma
-        text = fold_vfma(text, max_passes=fold_vfma_passes)
-    return text
+    opts = CascadeOptions(simd="avx2", inline_threshold=inline_threshold, fused=fused,
+                          fma_tree=fma_tree, fma_split=fma_split, global_cse=global_cse,
+                          lazy_prologue=lazy_prologue, vfma=fold_vfma_passes)
+    return emit_body(result, opts, header="\n".join(lines) + "\n")
 
 
 def emit_bssn_ir(simd: str = "scalar", target_L=None, verbose: bool = False,
@@ -131,20 +117,8 @@ def emit_bssn_ir(simd: str = "scalar", target_L=None, verbose: bool = False,
                       eta_mode=eta_mode, verbose=verbose,
                       auto_layers=auto_layers,
                       auto_search_order=auto_search_order)
-    # Same IR-level low-use inlining as the SIMD path; the regex-based
-    # emit_cpp_unrolled inliner stays off (naïve substring matching corrupts
-    # CASC_*_N vs CASC_*_NN prefixes), so pass inline_threshold=0 below.
-    if inline_threshold > 0:
-        result = _inline_low_use_temps(result, threshold=inline_threshold)
-    if global_cse:
-        # One global symbol-aware CSE instead of per-chunk: removes cross-chunk
-        # subexpression recompute. Scalar register-pressure win; SIMD-neutral.
-        body = result.emit_cpp_global_cse(dendro_var_style=True, short_names=True)
-    else:
-        body = result.emit_cpp_unrolled(
-            dendro_var_style=True, inline_threshold=0, short_names=False
-        )
-
+    # IR-level low-use inlining + (global|per-chunk) unrolled emission now live
+    # in emit_body(); the regex inliner of emit_cpp_unrolled stays off there.
     L = len(result.chunks)
     if L == 7:
         kind = "natural"
@@ -165,7 +139,9 @@ def emit_bssn_ir(simd: str = "scalar", target_L=None, verbose: bool = False,
             f"// gauge={gauge} ssl={ssl} cahd={cahd} eta_mode={eta_mode} -- "
             "wrapper must provide ssl_fac/cahd_coef scalars as applicable.")
     header.append("")
-    return "\n".join(header) + body + "\n"
+    opts = CascadeOptions(simd="scalar", inline_threshold=inline_threshold,
+                          global_cse=global_cse)
+    return emit_body(result, opts, header="\n".join(header))
 
 
 def main(argv=None):

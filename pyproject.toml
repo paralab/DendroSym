@@ -32,9 +32,13 @@ dependencies = [
 [project.optional-dependencies]
 gw = ["numpy-quaternion", "spherical-functions"]
 cachesim = ["pycachesim"]
+# cascade codegen extras: figures (liveness_viz/paperfig) and the JAX backend
+cascade-figs = ["matplotlib==3.9.2", "scipy==1.15.1"]
+cascade-jax = ["jax"]
 
 [project.scripts]
 dendro-build = "dendrosym.cli:main"
+dendro-cascade = "dendrosym.cascade.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["dendrosym*"]

@@ -631,3 +631,180 @@ def emit_kernel_function_cpp(
         text = fold_vfma(text, max_passes=fold_vfma_passes)
     return text
 
+
+
+# ---------------------------------------------------------------------------
+# Generic, option-driven composition of the pieces above (system-agnostic).
+#
+# emit_body() is the exact statement sequence the BSSN front-end
+# (systems/bssn/emit.py) performed after build_ir(); it is parameterised by
+# CascadeOptions so ANY system reaches the paper's knobs (inline threshold,
+# fused stencils, tree FMA, global CSE, lazy prologue) from one call. The BSSN
+# front-end is re-expressed on top of it and the regen oracle
+# (scripts/regen_vikr_kernels.sh) pins the bytes.
+# ---------------------------------------------------------------------------
+_VEC_MACROS = ("VEC", "VLOAD", "VSTORE", "VSET", "VADD", "VSUB", "VMUL", "VDIV",
+               "VFMA", "VFNMADD", "VSQRT", "VLOG", "VEXP")
+_VFNMADD = {
+    "scalar": "#define VFNMADD(a, b, c) ((c) - (a) * (b))",
+    "avx2": "#define VFNMADD(a, b, c) _mm256_fnmadd_pd((a), (b), (c))",
+    "avx512": "#define VFNMADD(a, b, c) _mm512_fnmadd_pd((a), (b), (c))",
+}
+
+
+def emit_body(result, options, header: str = "", vec=None) -> str:
+    """CascadeResult -> C++ body text under CascadeOptions.
+
+    SIMD (options.simd in avx2/avx512): the VEC-macro body meant to be
+    ``#include``d inside a wrapper loop that provides ``pp``, the VEC macros,
+    and every bare-scalar leaf as a VEC in scope. Same text for avx2 and
+    avx512 (only the wrapper's macro set differs).
+
+    Scalar: the unrolled ``const double`` body (Dendro naming, ``[pp]`` arrays).
+
+    ``header`` is placed verbatim before the body (end it with a newline).
+    ``vec`` forces the VEC-macro form even for options.simd == "scalar" (the
+    body then compiles per point under the width-1 macro set, VEC=double).
+
+    Store contract (vikr's): outputs whose name contains ``_rhs`` are
+    VSTORE'd / assigned to ``name[pp]``; every other output is a named local.
+    """
+    from dendrosym.cascade.vec_printer import fold_vfma
+
+    if options.inline_threshold > 0:
+        result = _inline_low_use_temps(result, threshold=options.inline_threshold)
+    use_vec = (options.simd != "scalar") if vec is None else vec
+    if not use_vec:
+        if options.fused:
+            raise NotImplementedError("fused=True requires the VEC emitter")
+        if options.global_cse:
+            body = result.emit_cpp_global_cse(dendro_var_style=True, short_names=True)
+        else:
+            body = result.emit_cpp_unrolled(
+                dendro_var_style=True, inline_threshold=0, short_names=False)
+        return header + body + "\n"
+
+    leaves = _classify_leaves(result, fused=options.fused)
+    lines = header.splitlines() if header else []
+    lines += _emit_avx_prologue(leaves)
+    if options.global_cse:
+        lines += _emit_avx_global_cse(result, leaves, fma=options.fma_tree,
+                                      split=options.fma_split)
+    else:
+        lines += _emit_avx_chunks(result, leaves, fma=options.fma_tree,
+                                  split=options.fma_split)
+    if options.lazy_prologue:
+        lines = _lazy_reorder(lines)
+    text = "\n".join(lines) + "\n"
+    if options.vfma > 0:
+        text = fold_vfma(text, max_passes=options.vfma)
+    return text
+
+
+def macro_block(simd: str) -> list:
+    """File-scope macro set for a wrapper: _macro_defines(simd) + VFNMADD
+    (tree FMA emits VFNMADD; the vikr wrappers define it by hand)."""
+    return _macro_defines(simd) + [_VFNMADD[simd]]
+
+
+def scalar_macro_block() -> list:
+    """Width-1 macro set usable INSIDE a function (no #include lines): the
+    same VEC body compiles per point with VEC=double. Preceded by undefs."""
+    return undef_block() + [l for l in _macro_defines("scalar")
+                            if not l.startswith("#include")] + [_VFNMADD["scalar"]]
+
+
+def undef_block() -> list:
+    return [f"#undef {m}" for m in _VEC_MACROS]
+
+
+def kernel_signature(result, options, fused_ok=False):
+    """Classify leaves/outputs of `result` into the argument groups a
+    standalone kernel (or a host wrapper) must provide. Returns a dict:
+    pp_arrays, idx_consts [(base, idx)], scalars, outputs (names containing
+    ``_rhs`` or ending ``_out``), idx_bases (unique bases)."""
+    leaves = _classify_leaves(result, fused=options.fused and fused_ok)
+    outputs = []
+    for c in result.chunks:
+        for nm in c.outputs:
+            if (nm.endswith("_out") or "_rhs" in nm) and nm not in outputs:
+                outputs.append(nm)
+    bases = []
+    for b, _i in leaves["idx_consts"]:
+        if b not in bases:
+            bases.append(b)
+    return {"pp_arrays": leaves["pp_arrays"], "idx_consts": leaves["idx_consts"],
+            "idx_bases": bases, "scalars": leaves["scalars"], "outputs": outputs,
+            "stencil_1st": leaves["stencil_1st"], "stencil_2nd": leaves["stencil_2nd"]}
+
+
+def emit_standalone_kernel(result, options, header: str = "") -> str:
+    """Complete C++ translation unit around emit_body(): macro set, a
+    ``static inline void <fn_name>(int N, ...)`` taking one ``const double*``
+    per ``X[pp]`` leaf, one ``const double*`` per indexed-constant base
+    (``lambda``), one ``double`` per bare scalar (``<name>_s``), one
+    ``double*`` per output; W-wide loop with shift-back tail and a width-1
+    fallback for N < W (scalar: a plain per-point loop, VEC=double).
+
+    Outputs: names containing ``_rhs`` are stored by the body itself;
+    names ending in ``_out`` are named locals the wrapper stores after the
+    body (their pointer parameter is ``<name>_ptr``). Any other object is an
+    intermediate.
+
+    Unlike emit_kernel_function_cpp (kept for its callers), this honours every
+    CascadeOptions knob because the body IS emit_body().
+    """
+    if options.fused:
+        raise NotImplementedError("fused stencils need a grid-aware wrapper "
+                                  "(nx/ny/hx.. in scope); use emit_body() in your own loop")
+    sig = kernel_signature(result, options)
+    body = emit_body(result, options, header=header, vec=True)
+    W = options.width
+    rhs_outs = [o for o in sig["outputs"] if "_rhs" in o]
+    out_outs = [o for o in sig["outputs"] if "_rhs" not in o]
+    args = ["    int N"]
+    args += [f"    const double *__restrict__ {a}" for a in sig["pp_arrays"]]
+    args += [f"    const double *__restrict__ {b}" for b in sig["idx_bases"]]
+    args += [f"    double {s}_s" for s in sig["scalars"]]
+    args += [f"    double *__restrict__ {o}" for o in rhs_outs]
+    args += [f"    double *__restrict__ {o}_ptr" for o in out_outs]
+    prologue = [f"const VEC {s} = VSET({s}_s);" for s in sig["scalars"]]
+    epilogue = [f"VSTORE({o}_ptr+pp, {o});" for o in out_outs]
+
+    def block(indent):
+        out = [indent + l for l in prologue]
+        out.append(indent + "{")
+        out += [indent + "    " + l if l else "" for l in body.rstrip("\n").split("\n")]
+        out += [indent + "    " + l for l in epilogue]
+        out.append(indent + "}")
+        return out
+
+    out = [f"// Auto-generated cascade kernel: {options.fn_name}",
+           f"// L = {len(result.chunks)} chunks; SIMD = {options.simd} ({W}-wide); "
+           f"inline_threshold={options.inline_threshold} fma_tree={options.fma_tree} "
+           f"global_cse={options.global_cse}", ""]
+    out += macro_block(options.simd)
+    out += ["", f"static inline void {options.fn_name}(", ",\n".join(args) + ") {"]
+    if W > 1:
+        out += ["    int i = 0;",
+                f"    if (N >= {W}) {{",
+                f"        for (; i + {W} <= N; i += {W}) {{",
+                "            const int pp = i;"]
+        out += block("            ")
+        out += ["        }",
+                "        // shift-back tail: recompute the overlap (deterministic per pp)",
+                "        if (i < N) {",
+                f"            const int pp = N - {W};"]
+        out += block("            ")
+        out += ["        }", "    } else {",
+                "        // fewer points than lanes: same body, width-1 macro set"]
+        out += ["        " + l for l in scalar_macro_block()]
+        out += ["        for (int pp = 0; pp < N; pp++) {"]
+        out += block("            ")
+        out += ["        }", "    }"]
+    else:
+        out += ["    for (int pp = 0; pp < N; pp++) {"]
+        out += block("        ")
+        out += ["    }"]
+    out += ["}", ""] + undef_block()
+    return "\n".join(out) + "\n"
