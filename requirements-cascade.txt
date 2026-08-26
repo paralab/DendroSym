@@ -1,0 +1,27 @@
+# Pinned environment for cascade code generation and figure regeneration.
+#
+# WHY PINNED: the cascade's per-chunk CSE output depends on the sympy version.
+# sympy drift is the documented reason the committed scalar ir_L* kernels stopped
+# being byte-reproducible with the current emitter. Regenerating a kernel under a
+# different sympy than the one it was validated with silently produces different
+# code that still gates at machine precision -- so the failure is invisible.
+#
+# Discovered 2026-08-05: `module load python/3.11.3` on CHPC notchpeak provides
+# sympy 1.11.1, against 1.13.3 locally. Do NOT use the module python for anything
+# that emits kernels. Build a venv from this file instead:
+#
+#   module load python/3.12.4          # interpreter only, no site-packages
+#   python3 -m venv ~/venv-cascade
+#   source ~/venv-cascade/bin/activate
+#   pip install -r requirements-codegen.txt
+#
+# and assert the versions in any job that regenerates:
+#   python3 -c "import sympy; assert sympy.__version__=='1.13.3', sympy.__version__"
+#
+# Reference interpreter: Python 3.12.6 (3.12.x is what these pins were resolved on).
+
+sympy==1.13.3        # load-bearing: sets CSE output, hence the emitted kernels
+numpy==2.3.5
+networkx==3.6.1      # nxgraph.py, Louvain auto-decomposition (non-default path)
+matplotlib==3.9.2    # paperfig / liveness_viz figure regeneration only
+scipy==1.15.1
