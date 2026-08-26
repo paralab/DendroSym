@@ -160,7 +160,12 @@ def t_bssn():
     r = bssn_cascade.build_ir()
     assert len(r.chunks) == 7
     # Fingerprint after the F14 deep-substitution fix (boundaries real).
-    assert [c.n_prior_refs for c in r.chunks] == [0, 0, 24, 25, 43, 70, 46]
+    # fingerprint re-derived 2026-08-26: vikr's test still says 70 for the
+    # derived_quantities layer, but vikr HEAD's own build_ir() gives 30 (the
+    # 2026-08-08 symmetric-trace/pow regen changed it; the emitted kernels are
+    # byte-identical to vikr's -- see scripts/regen_vikr_kernels.sh).
+    assert [c.n_prior_refs for c in r.chunks] == [0, 0, 24, 25, 43, 30, 46], \
+        [c.n_prior_refs for c in r.chunks]
 
 
 @test("[slow] BSSN: SSL+CAHD spec wires gauge terms through chunk symbols")
