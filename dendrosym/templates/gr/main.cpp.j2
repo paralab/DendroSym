@@ -21,6 +21,9 @@
 #include "octUtils.h"
 
 #include "grDef.h"
+{% if enable_profiling %}
+#include "profile_params.h"
+{% endif %}
 #include "grUtils.h"
 #include "parameters.h"
 #include "{{ project_name }}Ctx.h"
@@ -363,6 +366,11 @@ int main(int argc, char **argv) {
         std::cout << "  Final time: " << ets->curr_time() << std::endl;
         std::cout << GRN << "========================================" << NRM << std::endl;
     }
+{% if enable_profiling %}
+
+    // profiling option: MPI-reduced timer table (rhs body / derivs / KO / BCs / zip / unzip)
+    {{ namespace }}::timer::print_profile(comm);
+{% endif %}
 
     delete ets;
     delete ctx;

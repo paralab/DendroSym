@@ -64,6 +64,9 @@ def run(config, default_output_dir=None, argv=None):
     Recognized argv flags:
         --skip-gencode    skip the expensive CSE/equation-printing pass
         --gencode-only    only emit gencode .cpp.inc files
+        --profile / --no-profile
+                          print an MPI-reduced timer table (rhs body, derivatives,
+                          KO, BCs, zip/unzip) at the end of the run
         --cascade / --no-cascade
                           emit (or suppress) the polynomial-cascade SIMD kernel for
                           every var_type with a registered spec
@@ -87,6 +90,9 @@ def run(config, default_output_dir=None, argv=None):
     ap.add_argument("output_dir", nargs="?", default=None)
     ap.add_argument("--skip-gencode", action="store_true")
     ap.add_argument("--gencode-only", action="store_true")
+    ap.add_argument("--profile", dest="profile", action="store_true", default=None,
+                    help="emit the end-of-run timer table (config.enable_profiling)")
+    ap.add_argument("--no-profile", dest="profile", action="store_false")
     ap.add_argument("--cascade", dest="cascade", action="store_true", default=None,
                     help="emit the polynomial-cascade kernel (registered specs)")
     ap.add_argument("--no-cascade", dest="cascade", action="store_false")
@@ -97,6 +103,8 @@ def run(config, default_output_dir=None, argv=None):
         print(f"dendrosym.run: ignoring unrecognized arguments {unknown}", file=sys.stderr)
 
     skip = ns.skip_gencode
+    if ns.profile is not None:
+        config.enable_profiling = ns.profile
     gencode_only = ns.gencode_only
 
     # cascade overrides: CLI flags layer over whatever the config script registered

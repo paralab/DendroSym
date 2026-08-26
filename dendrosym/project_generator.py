@@ -661,6 +661,7 @@ class DendroProjectGenerator:
         # derivative system: if set, emit DendroDerivatives method calls
         ctx["deriv_obj"] = getattr(c, "deriv_obj", "")
         ctx["use_dendro_derivs"] = ctx["deriv_obj"] != ""
+        ctx["enable_profiling"] = bool(getattr(c, "enable_profiling", False))
 
         # initial data types -- entries carry "code" (raw C) or "sympy_exprs"
         # ({var: expr}); sympy_exprs are converted to C after param_subs is built

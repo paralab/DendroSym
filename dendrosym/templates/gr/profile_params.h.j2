@@ -7,6 +7,9 @@
 #define PROFILE_PARAMS_H
 
 #include "profiler.h"
+{% if enable_profiling %}
+#include "mpi.h"
+{% endif %}
 
 namespace {{ namespace }} {
 namespace timer {
@@ -26,6 +29,7 @@ extern profiler_t t_unzip_async;
 
 extern profiler_t t_deriv;
 extern profiler_t t_rhs;
+extern profiler_t t_ko;
 
 extern profiler_t t_bdyc;
 
@@ -37,6 +41,12 @@ extern profiler_t t_remesh;
 extern profiler_t t_gridTransfer;
 extern profiler_t t_ioVtu;
 extern profiler_t t_ioCheckPoint;
+
+{% if enable_profiling %}
+// end-of-run report (min / mean / max over ranks); enabled by the generator's
+// profiling option (config.enable_profiling / --profile).
+void print_profile(MPI_Comm comm);
+{% endif %}
 
 }  // namespace timer
 }  // namespace {{ namespace }}

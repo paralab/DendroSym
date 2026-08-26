@@ -99,6 +99,12 @@ class DendroConfiguration:
         # by default we want to replace and or expand the derivatives
         self.replace_and_expand_derivatives = True
 
+        # profiling: when True the generated main prints an MPI-reduced timer
+        # table (rhs body / derivatives / KO / BCs / zip / unzip) at the end of the
+        # run. The timers themselves are always compiled in (negligible cost);
+        # this only adds the report. CLI: `python <cfg>.py --profile`.
+        self.enable_profiling = False
+
         # by default we also want to pull the derivatives from the derivative workspace
         self.use_deriv_workspace = True
 
