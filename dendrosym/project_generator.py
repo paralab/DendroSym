@@ -287,6 +287,9 @@ def _run_var_type(args):
     deriv_calc = dendrosym.codegen.apply_deriv_struct(
         deriv_calc, _in_names, extra_names=staged_names
     )
+    # fused cascade (interior blocks compute their own 1st/pure-2nd derivatives):
+    # the reduced pass keeps only the mixed seconds + the firsts they read.
+    _deriv_calc_percall = deriv_calc
     # regroup into per-axis first-derivative tables (the batch-dispatch seam);
     # bit-identical -- independent first derivs commute, seconds stay ordered.
     deriv_calc = dendrosym.codegen.group_deriv_calc(deriv_calc)
@@ -340,11 +343,24 @@ def _run_var_type(args):
         print(f"    generating cascade kernel ({spec[1].simd})...", file=sys.stderr)
         from dendrosym.cascade import dendro_bridge as _cb
         spec_func, copts = spec
+        if copts.fused and vt != "evolution":
+            copts = copts.replace(fused=False)   # fusion is wired for the evolution kernel only
         ir = _cb.build_config_cascade(config, vt, spec_func, copts)
+        deriv_calc_fused = None
+        if copts.fused:
+            red = dendrosym.codegen.reduce_deriv_calc_for_fused(_deriv_calc_percall)
+            if red is None:
+                raise NotImplementedError(
+                    f"cascade fused={vt}: the deriv pass has calls the reducer does not "
+                    "recognize (staged/intermediate derivatives); fusion is not supported here")
+            deriv_calc_fused = dendrosym.codegen.group_deriv_calc(red[0])
+            print(f"    fused: deriv pass keeps {red[1]} of {red[1] + red[2]} stencil calls "
+                  f"on interior blocks", file=sys.stderr)
         parts = _cb.emit_config_cascade(
             ir, copts, config=config, var_type=vt, deriv_struct_text=deriv_struct,
             in_names=_in_names, use_advective=use_advective,
             staged_names=staged_names, project_name=prefix,
+            deriv_calc_fused=deriv_calc_fused,
         )
         cascade_files = _cb.write_cascade_files(gencode_dir, prefix, vt, parts)
         cascade_update[f"{vt}_cascade"] = _cb.cascade_ctx(cascade_files, copts)

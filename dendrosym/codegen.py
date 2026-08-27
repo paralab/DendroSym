@@ -543,6 +543,39 @@ _DERIV_CALL_PAT = regex.compile(
 )
 
 
+def reduce_deriv_calc_for_fused(calc: str):
+    """Keep only the derivative calls a FUSED cascade body still needs.
+
+    Input: the per-call form (before `group_deriv_calc`). The fused body computes
+    every 1st and pure-2nd derivative inline, so on interior blocks the deriv pass
+    only has to produce (a) the mixed seconds and (b) the first-order buffers those
+    mixed seconds read (`grad_y(d.X_xy, d.X_x)` needs `d.X_x`). Everything else --
+    pure seconds, and firsts nobody downstream reads -- is dropped. KO uses the
+    first-order buffers as scratch only and the BC table runs on boundary blocks,
+    which keep the full pass.
+
+    Returns (reduced_calc, kept, dropped) or None if a line is not a recognized
+    deriv call (staged/intermediate solvers), in which case fusion must be refused.
+    """
+    lines = [ln for ln in calc.splitlines() if ln.strip()]
+    parsed = []
+    for ln in lines:
+        m = _DERIV_CALL_PAT.match(ln)
+        if not m:
+            return None
+        parsed.append((ln, m.groups()))
+    needed = {src for _ln, (_o, op, _dst, src, _h) in parsed
+              if op in ("x", "y", "z") and src.startswith("d.")}
+    kept = []
+    for ln, (_o, op, dst, src, _h) in parsed:
+        if op in ("x", "y", "z") and src.startswith("d."):
+            kept.append(ln)                      # mixed second
+        elif op in ("x", "y", "z") and dst in needed:
+            kept.append(ln)                      # first feeding a mixed second
+    tail = "\n" if calc.endswith("\n") else ""
+    return "\n".join(kept) + tail, len(kept), len(parsed) - len(kept)
+
+
 def group_deriv_calc(calc: str) -> str:
     """Regroup the deriv-calc into batched `grad_*_batch` dispatches.
 

@@ -309,7 +309,22 @@ def t_bridge_emit():
     assert "__AVX512F__" in parts.select and "DENDRO_CASCADE_FLAT" in parts.select
     assert "toy_evolution_cascade_macros_avx512.cpp.inc" in parts.select
     assert "#define VMASK" in parts.macros_avx2 and "VLOADM(" in parts.body_tail
-    assert parts.manifest["simd"] == "compile-time"
+    assert parts.manifest["simd"] == "compile-time" and parts.manifest["fused"] is False
+    # fused: the fused body computes grad/grad2 from the state array; alias covers it
+    fparts = emit_config_cascade(ir, CascadeOptions(simd="avx2", fused=True), config=cfg,
+                                 var_type="evolution", deriv_struct_text=struct,
+                                 in_names=["alpha"], use_advective=False,
+                                 deriv_calc_fused="// reduced\n")
+    assert "idx60" in fparts.body_fused and "VLOAD(alpha+pp+1)" in fparts.body_fused
+    assert "VLOAD(grad_0_alpha+pp)" not in fparts.body_fused and "grad2_0_1_alpha" in fparts.body_fused
+    assert "VLOADM(alpha+pp+1)" in fparts.body_fused_tail
+    assert fparts.manifest["fused"] and fparts.manifest["stencil_vars"] == ["alpha"]
+    from dendrosym.codegen import reduce_deriv_calc_for_fused
+    calc = ("D.grad_x(d.a_x, in.a, hx, sz, bflag);\nD.grad_y(d.a_y, in.a, hy, sz, bflag);\n"
+            "D.grad_z(d.a_z, in.a, hz, sz, bflag);\nD.grad_xx(d.a_xx, in.a, hx, sz, bflag);\n"
+            "D.grad_y(d.a_xy, d.a_x, hy, sz, bflag);\nD.grad_x(d.b_x, in.b, hx, sz, bflag);\n")
+    red, kept, dropped = reduce_deriv_calc_for_fused(calc)
+    assert kept == 2 and dropped == 4 and "d.a_xy" in red and "d.a_x, in.a" in red and "d.b_x" not in red
     assert parts.body_tail.count("VSTOREM(") == parts.body.count("VSTORE(") and "VLOAD(" not in parts.body_tail
     assert "#include" not in parts.macros_scalar and "#define VEC double" in parts.macros_scalar
     assert parts.manifest["outputs"] == ["alpha_rhs"] and parts.manifest["params"] == ["eta"]
@@ -333,8 +348,8 @@ def t_template_off_render():
                              trim_blocks=True, lstrip_blocks=True)
     src = env.loader.get_source(env, "gr/rhs.cpp.j2")[0]
     assert "{% if evolution_cascade is defined %}" in src
-    ctx = {"project_name": "toy", "namespace": "toy",
-           "evolution_gencode": {"deriv_struct": "s.inc", "rhs_eqns": "r.inc"}}
+    ctx = {"project_name": "toy", "namespace": "toy", "project_upper": "TOY",
+           "evolution_gencode": {"deriv_struct": "s.inc", "rhs_eqns": "r.inc", "deriv_calc": "dc.inc"}}
     off = env.get_template("gr/rhs.cpp.j2").render(**ctx)
     casc = {"simd": "compile-time", "select": "sel.inc", "alias": "a.inc", "prologue": "p.inc",
             "body": "b.inc", "body_tail": "bt.inc", "macros_undef": "mu.inc"}
@@ -345,6 +360,14 @@ def t_template_off_render():
     assert '#include "../gencode/b.inc"' in on and '#include "../gencode/r.inc"' in on
     assert on.index("#ifndef DENDRO_CASCADE_FLAT") < on.index("b.inc") < on.index("#else") < on.index("r.inc") < on.index("#endif", on.index("#else"))
     assert "VMASK(__cascade_nvalid)" in on and '#include "../gencode/bt.inc"' in on
+    # fused: bflag dispatch for both the deriv pass and the loop
+    fon = env.get_template("gr/rhs.cpp.j2").render(**ctx, evolution_cascade={
+        **casc, "fused": True, "body_fused": "bf.inc", "body_fused_tail": "bft.inc",
+        "deriv_calc_fused": "dcf.inc"})
+    assert fon.count("if (bflag == 0)") == 2 and '#include "../gencode/dcf.inc"' in fon
+    assert '#include "../gencode/bf.inc"' in fon and '#include "../gencode/bft.inc"' in fon
+    assert fon.count('#include "../gencode/b.inc"') == 1 and "DERIVTYPE_FIRST" in fon
+    assert "if (bflag == 0)" not in on
     # the flat loop text is identical whether or not the cascade is present
     flat_loop = off[off.index("    for (unsigned int k = PW;"):off.index("    toy::timer::t_rhs.stop()")]
     assert flat_loop.endswith("    }\n") and flat_loop in on

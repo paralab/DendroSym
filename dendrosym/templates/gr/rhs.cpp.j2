@@ -21,6 +21,11 @@
 #include "parameters.h"
 #include "profile_params.h"
 #include "block_geometry.h"
+{% if evolution_cascade is defined and evolution_cascade.fused %}
+#include <iostream>
+#include <string>
+#include "mpi.h"
+{% endif %}
 
 using namespace std;
 using namespace {{ namespace }};
@@ -102,6 +107,28 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
 
     int idx[3];
     const unsigned int PW = {{ namespace }}::{{ project_upper }}_PADDING_WIDTH;
+{% if evolution_cascade is defined and evolution_cascade.fused %}
+#ifndef DENDRO_CASCADE_FLAT
+    // fused stencils are the explicit 6th-order centered ones (half-width 3): refuse
+    // to run silently against a different derivative engine or a narrower padding.
+    {
+        static bool __cascade_fused_checked = false;
+        if (!__cascade_fused_checked) {
+            if ({{ namespace }}::{{ project_upper }}_DERIVTYPE_FIRST != "E6" ||
+                {{ namespace }}::{{ project_upper }}_DERIVTYPE_SECOND != "E6" || PW < 3) {
+                std::cerr << "[cascade] fused stencils require derivatives.type_first/type_second = "
+                             "\"E6\" and a padding width >= 3 (got "
+                          << {{ namespace }}::{{ project_upper }}_DERIVTYPE_FIRST << ", "
+                          << {{ namespace }}::{{ project_upper }}_DERIVTYPE_SECOND << ", PW=" << PW
+                          << "); regenerate without --cascade-fused or build with -DCASCADE_KERNEL=flat"
+                          << std::endl;
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            __cascade_fused_checked = true;
+        }
+    }
+#endif
+{% endif %}
     unsigned int n = sz[0] * sz[1] * sz[2];
 
     {{ namespace }}::timer::t_deriv.start();
@@ -136,7 +163,21 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
     // deriv_calc fills the derivative buffers with the finite-difference stencils
     // (including the staged derivatives of the intermediate buffers above).
 {% if evolution_gencode is defined and evolution_gencode.deriv_calc is defined %}
+{% if evolution_cascade is defined and evolution_cascade.fused %}
+#ifndef DENDRO_CASCADE_FLAT
+    // fused cascade: interior blocks compute their 1st/pure-2nd derivatives inside the
+    // kernel, so only the mixed seconds (and the firsts they read) are precomputed.
+    // boundary blocks keep the full pass (the engine's one-sided stencils there).
+    if (bflag == 0) {
+#include "../gencode/{{ evolution_cascade.deriv_calc_fused }}"
+    } else
+#endif
+    {
 #include "../gencode/{{ evolution_gencode.deriv_calc }}"
+    }
+{% else %}
+#include "../gencode/{{ evolution_gencode.deriv_calc }}"
+{% endif %}
 {% endif %}
 
     {{ namespace }}::timer::t_deriv.stop();
@@ -146,16 +187,7 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
     // all the CSE-optimized code with DENDRO_nnnn temporaries.
     {{ namespace }}::timer::t_rhs.start();
 {% if evolution_cascade is defined %}
-#ifndef DENDRO_CASCADE_FLAT
-    {
-        // -- polynomial cascade RHS (SIMD width chosen at compile time, see the select file) --
-        // the body is the cascade engine's VEC kernel; the alias table maps its
-        // bare names onto in./d./out.; rows are walked W points at a time with a
-        // rows are walked W points at a time; the partial batch at the end of a row
-        // uses masked loads/stores (see the loop comment).
-#include "../gencode/{{ evolution_cascade.alias }}"
-        const unsigned int __cascade_i_lo = PW;
-        const unsigned int __cascade_i_hi = nx - PW;
+{% macro cascade_loop(body, body_tail) %}
         // batches start at every W-th interior point of a row; the last (partial)
         // batch is shifted back (unmasked) when the row has >= W points, else it
         // runs the MASKED body (lanes past the row are never read or written).
@@ -164,23 +196,41 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
                 for (unsigned int i = __cascade_i_lo; i < __cascade_i_hi; i += __cascade_W) {
                     const unsigned int __cascade_nvalid =
                         (__cascade_i_hi - i < __cascade_W) ? (__cascade_i_hi - i) : __cascade_W;
-                    // partial batch: on a row with >= W points shift it back to end at
-                    // i_hi (unmasked; the overlap is recomputed, deterministic per pp);
-                    // only a row narrower than W takes the masked body.
                     const bool __cascade_shift =
                         (__cascade_nvalid < __cascade_W) && (__cascade_i_hi >= __cascade_i_lo + __cascade_W);
                     const unsigned int __cascade_i0 = __cascade_shift ? (__cascade_i_hi - __cascade_W) : i;
                     const unsigned int pp = __cascade_i0 + nx * (j + ny * k);
 #include "../gencode/{{ evolution_cascade.prologue }}"
                     if (__cascade_nvalid == __cascade_W || __cascade_shift) {
-#include "../gencode/{{ evolution_cascade.body }}"
+#include "../gencode/{{ body }}"
                     } else {
                         const auto __cascade_mask = VMASK(__cascade_nvalid);
-#include "../gencode/{{ evolution_cascade.body_tail }}"
+#include "../gencode/{{ body_tail }}"
                     }
                 }
             }
         }
+{% endmacro %}
+#ifndef DENDRO_CASCADE_FLAT
+    {
+        // -- polynomial cascade RHS (SIMD width chosen at compile time, see the select file) --
+        // the body is the cascade engine's VEC kernel; the alias table maps its bare
+        // names onto in./d./out.; rows are walked W points at a time (masked partial
+        // batch, see the loop). A partial batch's overlap is recomputed, deterministic per pp.
+#include "../gencode/{{ evolution_cascade.alias }}"
+        const unsigned int __cascade_i_lo = PW;
+        const unsigned int __cascade_i_hi = nx - PW;
+{% if evolution_cascade.fused %}
+        if (bflag == 0) {
+            // interior block: fused body (inline 1st/pure-2nd stencils)
+{{ cascade_loop(evolution_cascade.body_fused, evolution_cascade.body_fused_tail) }}
+        } else {
+            // boundary block: precomputed derivatives (one-sided at the physical boundary)
+{{ cascade_loop(evolution_cascade.body, evolution_cascade.body_tail) }}
+        }
+{% else %}
+{{ cascade_loop(evolution_cascade.body, evolution_cascade.body_tail) }}
+{% endif %}
 #include "../gencode/{{ evolution_cascade.macros_undef }}"
     }
 #else

@@ -35,7 +35,7 @@ from pathlib import Path
 import sympy as sym
 from sympy.core.function import AppliedUndef, UndefinedFunction
 
-CASCADE_BRIDGE_VERSION = "b4"   # b4: compile-time width selection (select file);   # b2: masked tail batches (body_tail); b3: hybrid tail + half-integer pow printer          # part of the gencode cache discriminator
+CASCADE_BRIDGE_VERSION = "b5"   # b5: fused stencils (bflag dispatch);   # b4: compile-time width selection (select file);   # b2: masked tail batches (body_tail); b3: hybrid tail + half-integer pow printer          # part of the gencode cache discriminator
 CASCADE_TEMPLATE_SUPPORT = {"evolution", "constraint"}   # var_types whose template has the wrapper branch
 DERIV_FUNCS = ("grad", "grad2", "agrad", "kograd")
 COORD_LEAVES = ("x", "y", "z", "r_coord", "t")
@@ -66,6 +66,9 @@ class CascadeNamingError(ValueError):
 class CascadeParts:
     body: str            # width-agnostic VEC body (what the engine emits)
     body_tail: str       # same body with masked loads/stores (partial batches)
+    body_fused: str      # fused variant (inline 1st/pure-2nd stencils); "" when not fused
+    body_fused_tail: str
+    deriv_calc_fused: str  # reduced deriv pass for interior blocks; "" when not fused
     alias: str
     prologue: str
     select: str          # compile-time ISA selection -> includes one macro set, defines __cascade_W
@@ -135,10 +138,18 @@ def build_config_cascade(config, var_type, spec_func, options):
         raise CascadeNamingError("the cascade emitters assume idx_str == '[pp]'")
     if not getattr(config, "replace_and_expand_derivatives", True):
         raise NotImplementedError("cascade + staged compound derivatives is not supported")
-    if options.fused:
+    if options.fused and var_type != "evolution":
+        # fusion is wired for the evolution kernel only (physcon keeps precomputed
+        # derivatives); --cascade-fused applies to every registered spec, so downgrade
+        # quietly instead of failing the whole generation.
+        import sys as _sys
+        print(f"    cascade({var_type}): fused stencils not wired for this kernel -> plain "
+              "cascade", file=_sys.stderr)
+        options = options.replace(fused=False)
+    if options.fused and getattr(config, "use_advective_derivs", False):
         raise NotImplementedError(
-            "fused stencils in the Dendro-6 wrapper are a follow-on (needs interior-only "
-            "handling and dropping the 1st/pure-2nd d.* buffers)")
+            "fused stencils would compute advective (upwind) derivatives with the centered "
+            "stencil; not supported with use_advective_derivs")
 
     if config.stored_rhs_function.get(var_type) is None:
         config.find_derivatives(var_type)
@@ -210,7 +221,7 @@ def _alias_target(token, in_names, use_advective, staged_names):
 
 def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
                         in_names, use_advective, staged_names=(),
-                        project_name="") -> CascadeParts:
+                        project_name="", deriv_calc_fused=None) -> CascadeParts:
     from dendrosym.cascade.emit import (emit_body, kernel_signature, macro_block,
                                         masked_body, scalar_macro_block, undef_block)
     if staged_names:
@@ -219,7 +230,8 @@ def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
     # the VEC body is width-agnostic (only the macro set differs between AVX2 and
     # AVX-512), so it is emitted ONCE and the wrapper picks the width at compile
     # time. `options.simd` therefore does not affect solver output.
-    options = options.replace(simd="avx2")
+    fused = bool(options.fused)
+    options = options.replace(simd="avx2", fused=False)
     sig = kernel_signature(ir, options)
     members = struct_members(deriv_struct_text)
     out_fields = list(config.all_var_names.get(var_type, []))
@@ -241,6 +253,17 @@ def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
         "",
     ]
     body = emit_body(ir, options, header="\n".join(header) + "\n", vec=True)
+    body_fused = ""
+    stencil_vars = []
+    if fused:
+        fheader = list(header)
+        fheader[1:1] = ["// FUSED: 1st/pure-2nd derivatives via inline 6th-order stencils "
+                        "(reads the state arrays at pp +- k*stride); mixed seconds precomputed;",
+                        "// INTERIOR blocks only (bflag == 0) -- the wrapper dispatches."]
+        body_fused = emit_body(ir, options.replace(fused=True),
+                               header="\n".join(fheader) + "\n", vec=True)
+        fsig = kernel_signature(ir, options.replace(fused=True), fused_ok=True)
+        stencil_vars = sorted({v for _a, _d, v in fsig["stencil_1st"] + fsig["stencil_2nd"]})
 
     # --- alias table -------------------------------------------------------
     alias = OrderedDict()
@@ -256,6 +279,12 @@ def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
             alias[arr] = f"const double *const {arr} = {in_struct}.{arr};"
         else:
             raise CascadeNamingError(f"cannot map cascade leaf {arr!r} (-> {t!r}) onto the wrapper")
+    for v in stencil_vars:
+        if v in alias:
+            continue
+        if v not in in_names:
+            raise CascadeNamingError(f"fused stencil source {v!r} is not an input field")
+        alias[v] = f"const double *const {v} = {in_struct}.{v};"
     for o in sig["outputs"]:
         if not o.endswith("_rhs"):
             raise CascadeNamingError(f"output {o!r} is not a *_rhs name")
@@ -363,10 +392,15 @@ def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
         "in_names": list(in_names), "out_fields": out_fields,
         "struct_members": sorted(members),
         "use_advective": bool(use_advective),
+        "fused": fused,
+        "stencil_vars": stencil_vars,
     }
     return CascadeParts(
         body=body,
         body_tail=masked_body(body),
+        body_fused=body_fused,
+        body_fused_tail=masked_body(body_fused) if fused else "",
+        deriv_calc_fused=(deriv_calc_fused or "") if fused else "",
         alias="\n".join(["// cascade alias table (generated): vikr leaf/output names -> Dendro-6 storage"]
                         + list(alias.values())) + "\n",
         prologue="\n".join(["// cascade per-batch prologue (generated)"] + prologue) + "\n",
@@ -379,7 +413,8 @@ def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
 # ---------------------------------------------------------------------------
 # files + template context
 # ---------------------------------------------------------------------------
-FILE_KEYS = ("body", "body_tail", "alias", "prologue", "select", "macros_avx2", "macros_avx512",
+FILE_KEYS = ("body", "body_tail", "body_fused", "body_fused_tail", "deriv_calc_fused",
+             "alias", "prologue", "select", "macros_avx2", "macros_avx512",
              "macros_scalar", "macros_undef", "manifest")
 
 
@@ -395,13 +430,15 @@ def write_cascade_files(gencode_dir, prefix: str, var_type: str, parts: CascadeP
         content = getattr(parts, k)
         if k == "manifest":
             content = json.dumps(content, indent=1, sort_keys=True) + "\n"
+        elif k in ("body_fused", "body_fused_tail", "deriv_calc_fused") and not content:
+            content = "// fused stencils not enabled for this kernel (CascadeOptions.fused=False)\n"
         (gencode_dir / files[k]).write_text(content)
     return files
 
 
 def cascade_ctx(files: dict, options) -> dict:
     """The ``ctx[f"{vt}_cascade"]`` dict the rhs.cpp.j2 branch reads."""
-    return {"simd": "compile-time", **files}
+    return {"simd": "compile-time", "fused": bool(options.fused), **files}
 
 
 # ---------------------------------------------------------------------------
