@@ -644,7 +644,7 @@ def emit_kernel_function_cpp(
 # (scripts/regen_vikr_kernels.sh) pins the bytes.
 # ---------------------------------------------------------------------------
 _VEC_MACROS = ("VEC", "VLOAD", "VSTORE", "VSET", "VADD", "VSUB", "VMUL", "VDIV",
-               "VFMA", "VFNMADD", "VSQRT", "VLOG", "VEXP")
+               "VFMA", "VFNMADD", "VSQRT", "VLOG", "VEXP", "VMASK", "VLOADM", "VSTOREM", "VPOW")
 _VFNMADD = {
     "scalar": "#define VFNMADD(a, b, c) ((c) - (a) * (b))",
     "avx2": "#define VFNMADD(a, b, c) _mm256_fnmadd_pd((a), (b), (c))",
@@ -701,17 +701,57 @@ def emit_body(result, options, header: str = "", vec=None) -> str:
     return text
 
 
+# masked-lane macros for a wrapper's partial (tail) batch: VMASK(n) builds the
+# mask for the first n lanes; VLOADM/VSTOREM never touch masked-off lanes, so a
+# batch may extend past the valid points without reading garbage (uninitialised
+# workspace padding is often denormal -> microcode assists) or writing outside.
+# per-lane pow for exponents the printer cannot reduce to VSQRT/VMUL (adapter side,
+# same shape as the engine's _vlog_lanes/_vexp_lanes helpers).
+def _vpow_lines(simd):
+    if simd == "scalar":
+        return ["#define VPOW(a, b)    (std::pow((a), (b)))"]
+    typ, lanes, align = (("__m256d", 4, 32) if simd == "avx2" else ("__m512d", 8, 64))
+    store = "_mm256_store_pd" if simd == "avx2" else "_mm512_store_pd"
+    load = "_mm256_load_pd" if simd == "avx2" else "_mm512_load_pd"
+    return [f"static inline {typ} _vpow_lanes({typ} x, {typ} y) {{",
+            f"    alignas({align}) double _a[{lanes}], _b[{lanes}]; {store}(_a, x); {store}(_b, y);",
+            f"    for (int _i = 0; _i < {lanes}; _i++) _a[_i] = std::pow(_a[_i], _b[_i]);",
+            f"    return {load}(_a);", "}",
+            "#define VPOW(a, b)    _vpow_lanes((a), (b))"]
+
+
+_MASKED = {
+    "scalar": ["#define VMASK(n)      (n)",
+               "#define VLOADM(p)     (*(p))",
+               "#define VSTOREM(p, v) (*(p) = (v))"],
+    "avx2": ["#define VMASK(n)      _mm256_set_epi64x((n) > 3 ? -1LL : 0LL, (n) > 2 ? -1LL : 0LL, "
+             "(n) > 1 ? -1LL : 0LL, (n) > 0 ? -1LL : 0LL)",
+             "#define VLOADM(p)     _mm256_maskload_pd((p), __cascade_mask)",
+             "#define VSTOREM(p, v) _mm256_maskstore_pd((p), __cascade_mask, (v))"],
+    "avx512": ["#define VMASK(n)      ((__mmask8)((1u << (n)) - 1u))",
+               "#define VLOADM(p)     _mm512_maskz_loadu_pd(__cascade_mask, (p))",
+               "#define VSTOREM(p, v) _mm512_mask_storeu_pd((p), __cascade_mask, (v))"],
+}
+
+
 def macro_block(simd: str) -> list:
     """File-scope macro set for a wrapper: _macro_defines(simd) + VFNMADD
-    (tree FMA emits VFNMADD; the vikr wrappers define it by hand)."""
-    return _macro_defines(simd) + [_VFNMADD[simd]]
+    (tree FMA emits VFNMADD; the vikr wrappers define it by hand) + the
+    masked-lane macros VMASK/VLOADM/VSTOREM for partial batches."""
+    return _macro_defines(simd) + [_VFNMADD[simd]] + _MASKED[simd] + _vpow_lines(simd)
+
+
+def masked_body(body: str) -> str:
+    """The same VEC body with every VLOAD/VSTORE turned into its masked form
+    (a text transform on the emitted body; the engine is untouched)."""
+    return re.sub(r"\bVSTORE\(", "VSTOREM(", re.sub(r"\bVLOAD\(", "VLOADM(", body))
 
 
 def scalar_macro_block() -> list:
     """Width-1 macro set usable INSIDE a function (no #include lines): the
     same VEC body compiles per point with VEC=double. Preceded by undefs."""
     return undef_block() + [l for l in _macro_defines("scalar")
-                            if not l.startswith("#include")] + [_VFNMADD["scalar"]]
+                            if not l.startswith("#include")] + [_VFNMADD["scalar"]] + _MASKED["scalar"] + _vpow_lines("scalar")
 
 
 def undef_block() -> list:

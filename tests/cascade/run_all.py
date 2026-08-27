@@ -305,6 +305,8 @@ def t_bridge_emit():
     assert "const VEC eta = VSET(__cascade_scalar_eta);" in parts.prologue
     assert "VSTORE(alpha_rhs+pp," in parts.body and "lambda_0 = VSET((double)(lambda[0]))" in parts.body
     assert "#define VFNMADD" in parts.macros and "__AVX2__" in parts.macros
+    assert "#define VMASK" in parts.macros and "VLOADM(" in parts.body_tail
+    assert parts.body_tail.count("VSTOREM(") == parts.body.count("VSTORE(") and "VLOAD(" not in parts.body_tail
     assert "#include" not in parts.macros_scalar and "#define VEC double" in parts.macros_scalar
     assert parts.manifest["outputs"] == ["alpha_rhs"] and parts.manifest["params"] == ["eta"]
     # a leaf whose buffer the deriv struct lacks must fail loudly
@@ -332,9 +334,20 @@ def t_template_off_render():
     off = env.get_template("gr/rhs.cpp.j2").render(**ctx)
     on = env.get_template("gr/rhs.cpp.j2").render(**ctx, evolution_cascade={
         "simd": "avx2", "width": 4, "macros": "m.inc", "alias": "a.inc", "prologue": "p.inc",
-        "body": "b.inc", "macros_scalar": "ms.inc", "macros_undef": "mu.inc"})
+        "body": "b.inc", "body_tail": "bt.inc", "macros_scalar": "ms.inc", "macros_undef": "mu.inc"})
     assert "cascade" not in off and '#include "../gencode/r.inc"' in off
     assert "__cascade_W = 4" in on and '#include "../gencode/b.inc"' in on and "r.inc" not in on
+    assert "VMASK(__cascade_nvalid)" in on and '#include "../gencode/bt.inc"' in on
+    # constraint kernel: same branch in physcon.cpp.j2, keyed on constraint_cascade
+    pctx = {"project_name": "toy", "namespace": "toy", "project_upper": "TOY",
+            "constraint_gencode": {"deriv_struct": "cs.inc", "rhs_eqns": "cr.inc"},
+            "evolution_var_extraction": "", "constraint_output_extraction": ""}
+    poff = env.get_template("gr/physcon.cpp.j2").render(**pctx)
+    pon = env.get_template("gr/physcon.cpp.j2").render(**pctx, constraint_cascade={
+        "simd": "avx2", "width": 4, "macros": "m.inc", "alias": "a.inc", "prologue": "p.inc",
+        "body": "b.inc", "body_tail": "bt.inc", "macros_scalar": "ms.inc", "macros_undef": "mu.inc"})
+    assert "cascade" not in poff and '#include "../gencode/cr.inc"' in poff
+    assert "__cascade_W = 4" in pon and "cr.inc" not in pon and "const double x = pmin[0]" not in pon
     # the off-render must equal what the pre-cascade template produced: the
     # committed CCZ4 rhs.cpp (flat) is that reference when available.
     ref = pathlib.Path.home() / "research/ccz4-gr/solver/src/rhs.cpp"

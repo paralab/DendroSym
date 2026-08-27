@@ -150,45 +150,33 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
         // -- polynomial cascade RHS ({{ evolution_cascade.simd }}, {{ evolution_cascade.width }} lanes) --
         // the body is the cascade engine's VEC kernel; the alias table maps its
         // bare names onto in./d./out.; rows are walked W points at a time with a
-        // shift-back tail (overlap recomputed, deterministic per pp). Blocks whose
-        // interior row is narrower than W run the same body at width 1.
+        // rows are walked W points at a time; the partial batch at the end of a row
+        // uses masked loads/stores (see the loop comment).
 #include "../gencode/{{ evolution_cascade.alias }}"
         constexpr unsigned int __cascade_W = {{ evolution_cascade.width }};
         const unsigned int __cascade_i_lo = PW;
         const unsigned int __cascade_i_hi = nx - PW;
-        if (__cascade_i_hi >= __cascade_i_lo + __cascade_W) {
-            for (unsigned int k = PW; k < nz - PW; k++) {
-                for (unsigned int j = PW; j < ny - PW; j++) {
-                    unsigned int i = __cascade_i_lo;
-                    for (; i + __cascade_W <= __cascade_i_hi; i += __cascade_W) {
-                        const unsigned int __cascade_i0 = i;
-                        const unsigned int pp = __cascade_i0 + nx * (j + ny * k);
+        // batches start at every W-th interior point of a row; the last (partial)
+        // batch is shifted back (unmasked) when the row has >= W points, else it
+        // runs the MASKED body (lanes past the row are never read or written).
+        for (unsigned int k = PW; k < nz - PW; k++) {
+            for (unsigned int j = PW; j < ny - PW; j++) {
+                for (unsigned int i = __cascade_i_lo; i < __cascade_i_hi; i += __cascade_W) {
+                    const unsigned int __cascade_nvalid =
+                        (__cascade_i_hi - i < __cascade_W) ? (__cascade_i_hi - i) : __cascade_W;
+                    // partial batch: on a row with >= W points shift it back to end at
+                    // i_hi (unmasked; the overlap is recomputed, deterministic per pp);
+                    // only a row narrower than W takes the masked body.
+                    const bool __cascade_shift =
+                        (__cascade_nvalid < __cascade_W) && (__cascade_i_hi >= __cascade_i_lo + __cascade_W);
+                    const unsigned int __cascade_i0 = __cascade_shift ? (__cascade_i_hi - __cascade_W) : i;
+                    const unsigned int pp = __cascade_i0 + nx * (j + ny * k);
 #include "../gencode/{{ evolution_cascade.prologue }}"
-                        {
+                    if (__cascade_nvalid == __cascade_W || __cascade_shift) {
 #include "../gencode/{{ evolution_cascade.body }}"
-                        }
-                    }
-                    if (i < __cascade_i_hi) {
-                        const unsigned int __cascade_i0 = __cascade_i_hi - __cascade_W;
-                        const unsigned int pp = __cascade_i0 + nx * (j + ny * k);
-#include "../gencode/{{ evolution_cascade.prologue }}"
-                        {
-#include "../gencode/{{ evolution_cascade.body }}"
-                        }
-                    }
-                }
-            }
-        } else {
-#include "../gencode/{{ evolution_cascade.macros_scalar }}"
-            for (unsigned int k = PW; k < nz - PW; k++) {
-                for (unsigned int j = PW; j < ny - PW; j++) {
-                    for (unsigned int i = __cascade_i_lo; i < __cascade_i_hi; i++) {
-                        const unsigned int __cascade_i0 = i;
-                        const unsigned int pp = __cascade_i0 + nx * (j + ny * k);
-#include "../gencode/{{ evolution_cascade.prologue }}"
-                        {
-#include "../gencode/{{ evolution_cascade.body }}"
-                        }
+                    } else {
+                        const auto __cascade_mask = VMASK(__cascade_nvalid);
+#include "../gencode/{{ evolution_cascade.body_tail }}"
                     }
                 }
             }

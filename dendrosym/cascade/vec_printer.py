@@ -263,9 +263,19 @@ class VecPrinter(CodePrinter):
                 return f"VDIV(VSET(1.0), {self._print(pos_pow)})"
         if exp.is_Number and exp == Rational(1, 2):
             return f"VSQRT({self._print(base)})"
-        # Fallback for unusual exponents: scalar pow on lane (would need
-        # per-lane fallback in true SIMD; ok for now since BSSN doesn't use it).
-        return f"pow({self._print(base)}, {self._print(exp)})"
+        # half-integer exponents p/2 (|p| odd, e.g. -1/2, 3/2 from 1/sqrt(...) and
+        # tetrad normalisations): x^(p/2) = sqrt(x) * x^((|p|-1)/2), reciprocal if p<0.
+        # No vikr kernel reaches this branch (they contained no pow()), so the
+        # checked-in kernels are unaffected.
+        if exp.is_Number and exp.is_Rational and exp.q == 2:
+            b = self._print(base)
+            body = f"VSQRT({b})"
+            for _ in range((abs(exp.p) - 1) // 2):
+                body = f"VMUL({body}, {b})"
+            return body if exp.p > 0 else f"VDIV(VSET(1.0), {body})"
+        # anything else: per-lane pow via the VPOW macro (the wrapper's macro set
+        # defines it, like VLOG/VEXP).
+        return f"VPOW({self._print(base)}, {self._print(exp)})"
 
     # ----- CodePrinter scaffolding -----
 

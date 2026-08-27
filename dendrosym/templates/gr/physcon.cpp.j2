@@ -54,6 +54,10 @@ void {{ project_name }}Constraints(double **uzipConsVars, const double **uZipVar
 {% if constraint_gencode is defined and constraint_gencode.deriv_struct is defined %}
 #include "../gencode/{{ constraint_gencode.deriv_struct }}"
 {% endif %}
+{% if constraint_cascade is defined %}
+// polynomial-cascade SIMD kernel: macro set ({{ constraint_cascade.simd }}, {{ constraint_cascade.width }} lanes)
+#include "../gencode/{{ constraint_cascade.macros }}"
+{% endif %}
 
 void {{ project_name }}physcon(double **unzipConsVars, const double **uZipVars,
                  const unsigned int &offset, const double *pmin,
@@ -108,6 +112,44 @@ void {{ project_name }}physcon(double **unzipConsVars, const double **uZipVars,
 {% endif %}
 
     // main constraint computation loop
+{% if constraint_cascade is defined %}
+    {
+        // -- polynomial cascade constraints ({{ constraint_cascade.simd }}, {{ constraint_cascade.width }} lanes) --
+        // same wrapper shape as the evolution RHS (see rhs.cpp): alias table, W-stride
+        // rows with a masked partial batch. Coordinate leaves (x, y, z) are built per
+        // batch in the prologue as lane vectors.
+#include "../gencode/{{ constraint_cascade.alias }}"
+        constexpr unsigned int __cascade_W = {{ constraint_cascade.width }};
+        const unsigned int __cascade_i_lo = PW;
+        const unsigned int __cascade_i_hi = nx - PW;
+        // batches start at every W-th interior point of a row; the last (partial)
+        // batch is shifted back (unmasked) when the row has >= W points, else it
+        // runs the MASKED body (lanes past the row are never read or written).
+        for (unsigned int k = PW; k < nz - PW; k++) {
+            for (unsigned int j = PW; j < ny - PW; j++) {
+                for (unsigned int i = __cascade_i_lo; i < __cascade_i_hi; i += __cascade_W) {
+                    const unsigned int __cascade_nvalid =
+                        (__cascade_i_hi - i < __cascade_W) ? (__cascade_i_hi - i) : __cascade_W;
+                    // partial batch: on a row with >= W points shift it back to end at
+                    // i_hi (unmasked; the overlap is recomputed, deterministic per pp);
+                    // only a row narrower than W takes the masked body.
+                    const bool __cascade_shift =
+                        (__cascade_nvalid < __cascade_W) && (__cascade_i_hi >= __cascade_i_lo + __cascade_W);
+                    const unsigned int __cascade_i0 = __cascade_shift ? (__cascade_i_hi - __cascade_W) : i;
+                    const unsigned int pp = __cascade_i0 + nx * (j + ny * k);
+#include "../gencode/{{ constraint_cascade.prologue }}"
+                    if (__cascade_nvalid == __cascade_W || __cascade_shift) {
+#include "../gencode/{{ constraint_cascade.body }}"
+                    } else {
+                        const auto __cascade_mask = VMASK(__cascade_nvalid);
+#include "../gencode/{{ constraint_cascade.body_tail }}"
+                    }
+                }
+            }
+        }
+#include "../gencode/{{ constraint_cascade.macros_undef }}"
+    }
+{% else %}
     for (unsigned int k = PW; k < nz - PW; k++) {
         for (unsigned int j = PW; j < ny - PW; j++) {
             for (unsigned int i = PW; i < nx - PW; i++) {
@@ -123,6 +165,7 @@ void {{ project_name }}physcon(double **unzipConsVars, const double **uZipVars,
             }
         }
     }
+{% endif %}
 
     // cleanup
 {% if constraint_gencode is defined and constraint_gencode.intermediate_grad_dealloc is defined %}

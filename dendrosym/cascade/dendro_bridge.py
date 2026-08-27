@@ -35,8 +35,8 @@ from pathlib import Path
 import sympy as sym
 from sympy.core.function import AppliedUndef, UndefinedFunction
 
-CASCADE_BRIDGE_VERSION = "b1"          # part of the gencode cache discriminator
-CASCADE_TEMPLATE_SUPPORT = {"evolution"}   # var_types whose template has the wrapper branch
+CASCADE_BRIDGE_VERSION = "b3"   # b2: masked tail batches (body_tail); b3: hybrid tail + half-integer pow printer          # part of the gencode cache discriminator
+CASCADE_TEMPLATE_SUPPORT = {"evolution", "constraint"}   # var_types whose template has the wrapper branch
 DERIV_FUNCS = ("grad", "grad2", "agrad", "kograd")
 COORD_LEAVES = ("x", "y", "z", "r_coord", "t")
 
@@ -65,6 +65,7 @@ class CascadeNamingError(ValueError):
 @dataclasses.dataclass
 class CascadeParts:
     body: str
+    body_tail: str
     alias: str
     prologue: str
     macros: str
@@ -209,7 +210,7 @@ def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
                         in_names, use_advective, staged_names=(),
                         project_name="") -> CascadeParts:
     from dendrosym.cascade.emit import (emit_body, kernel_signature, macro_block,
-                                        scalar_macro_block, undef_block)
+                                        masked_body, scalar_macro_block, undef_block)
     if staged_names:
         raise NotImplementedError("cascade + staged/intermediate buffers is not supported")
 
@@ -336,6 +337,7 @@ def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
     }
     return CascadeParts(
         body=body,
+        body_tail=masked_body(body),
         alias="\n".join(["// cascade alias table (generated): vikr leaf/output names -> Dendro-6 storage"]
                         + list(alias.values())) + "\n",
         prologue="\n".join(["// cascade per-batch prologue (generated)"] + prologue) + "\n",
@@ -347,7 +349,7 @@ def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
 # ---------------------------------------------------------------------------
 # files + template context
 # ---------------------------------------------------------------------------
-FILE_KEYS = ("body", "alias", "prologue", "macros", "macros_scalar", "macros_undef", "manifest")
+FILE_KEYS = ("body", "body_tail", "alias", "prologue", "macros", "macros_scalar", "macros_undef", "manifest")
 
 
 def cascade_filenames(prefix: str, var_type: str) -> dict:
@@ -374,7 +376,7 @@ def cascade_ctx(files: dict, options) -> dict:
 # ---------------------------------------------------------------------------
 # verification harness (gate b): flat body vs cascade wrapper on random inputs
 # ---------------------------------------------------------------------------
-def emit_verification_harness(manifest_path, gencode_dir, out_cpp, n_points=4096,
+def emit_verification_harness(manifest_path, gencode_dir, out_cpp, n_points=4099,
                               amp=1e-4, tol=1e-12) -> str:
     """Write a standalone C++ program that evaluates the FLAT rhs_eqns body and
     the cascade wrapper (alias + prologue + body, W-loop with shift-back tail
@@ -429,25 +431,19 @@ def emit_verification_harness(manifest_path, gencode_dir, out_cpp, n_points=4096
           f'#include "{gencode_dir / files["alias"]}"',
           f"        constexpr unsigned int __cascade_W = {W};",
           "        const unsigned int __cascade_i_lo = 0, __cascade_i_hi = N;",
-          "        if (__cascade_i_hi >= __cascade_i_lo + __cascade_W) {",
-          "            unsigned int i = __cascade_i_lo;",
-          "            for (; i + __cascade_W <= __cascade_i_hi; i += __cascade_W) {",
-          "                const unsigned int __cascade_i0 = i; const unsigned int pp = __cascade_i0;",
-          f'#include "{gencode_dir / files["prologue"]}"',
-          "                {", f'#include "{gencode_dir / files["body"]}"', "                }",
-          "            }",
-          "            if (i < __cascade_i_hi) {",
-          "                const unsigned int __cascade_i0 = __cascade_i_hi - __cascade_W;"
+          "        for (unsigned int i = __cascade_i_lo; i < __cascade_i_hi; i += __cascade_W) {",
+          "            const unsigned int __cascade_nvalid = (__cascade_i_hi - i < __cascade_W)"
+          " ? (__cascade_i_hi - i) : __cascade_W;",
+          "            const bool __cascade_shift = (__cascade_nvalid < __cascade_W) &&"
+          " (__cascade_i_hi >= __cascade_i_lo + __cascade_W);",
+          "            const unsigned int __cascade_i0 = __cascade_shift ? (__cascade_i_hi - __cascade_W) : i;"
           " const unsigned int pp = __cascade_i0;",
           f'#include "{gencode_dir / files["prologue"]}"',
-          "                {", f'#include "{gencode_dir / files["body"]}"', "                }",
-          "            }",
-          "        } else {",
-          f'#include "{gencode_dir / files["macros_scalar"]}"',
-          "            for (unsigned int i = __cascade_i_lo; i < __cascade_i_hi; i++) {",
-          "                const unsigned int __cascade_i0 = i; const unsigned int pp = i;",
-          f'#include "{gencode_dir / files["prologue"]}"',
-          "                {", f'#include "{gencode_dir / files["body"]}"', "                }",
+          "            if (__cascade_nvalid == __cascade_W || __cascade_shift) {",
+          f'#include "{gencode_dir / files["body"]}"',
+          "            } else {",
+          "                const auto __cascade_mask = VMASK(__cascade_nvalid);",
+          f'#include "{gencode_dir / files["body_tail"]}"',
           "            }",
           "        }",
           f'#include "{gencode_dir / files["macros_undef"]}"',
