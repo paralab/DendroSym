@@ -45,6 +45,66 @@ This repository is installed as a Python package. The project is not on PyPi.org
 
 More information to come. A sample Python file will be included soon.
 
+## Polynomial cascade code generation
+
+`dendrosym.cascade` is the *polynomial cascade* code generator: you declare a system as **named
+objects in evaluation order** (for GR: inverse metric → Christoffel symbols → Ricci → right-hand
+sides), each layer is common-subexpression-eliminated **separately** and references earlier layers
+by name, and the result is emitted as a scalar kernel or a SIMD (AVX2 / AVX-512) VEC-macro kernel,
+optionally with the 6th-order derivative stencils fused into the kernel. Per-layer CSE keeps every
+layer a small named blob instead of one flat body the compiler cannot vectorize; the same machinery
+drives the `--cascade` option of the generated solvers (see a generated project's `CUSTOMIZE.md`).
+The module depends only on `sympy`, `numpy` and `networkx` and imports without the rest of the
+solver toolkit.
+
+**Quickstart** (`dendrosym/cascade/examples/demo_user_api.py`):
+
+```python
+from collections import OrderedDict
+import sympy as sym
+from dendrosym.cascade import compile_system, report
+
+a, x, y, z = sym.symbols("a x y z")
+inv, g0, g1, g2, f0, f1, h0, q0 = sym.symbols("inv g0 g1 g2 f0 f1 h0 q0")
+
+my_system = [                       # your derivation, in the order you would write it
+    ("inv", OrderedDict(inv=1/a)),
+    ("g",   OrderedDict(g0=x*x + y*y, g1=x*y + z*z, g2=y*z + x*z)),
+    ("f",   OrderedDict(f0=g0*inv + g1*inv, f1=g1*inv + g2*inv)),
+    ("h",   OrderedDict(h0=f0*f0 + f1*f1 + f0*f1)),
+    ("q",   OrderedDict(q0=(x + y + z)**2 + (x - y)*(y - z))),
+    ("out", OrderedDict(out0=h0 + q0*inv, out1=h0*g2 + g0*inv)),   # reference earlier outputs BY SYMBOL
+]
+
+code, ir = compile_system(my_system, {a, x, y, z}, out="toy_kernel.cpp", verbose=True)
+report(ir)                                  # layers, widths, temps
+code3, ir3 = compile_system(my_system, {a, x, y, z}, L=3)   # or pin the depth
+```
+
+Every knob lives in one dataclass: `compile_system(specs, leaves, options=CascadeOptions(simd="avx512",
+L=7, fma_tree=True, inline_threshold=2, ...))` returns a complete standalone kernel; `build()` +
+`emit_body()` give the bare VEC body for your own loop. Naming drives classification: `name[pp]`
+is a per-point array, `name[N]` an indexed constant, a bare `name` a scalar the caller provides;
+outputs are the objects whose names contain `_rhs` (or end in `_out`).
+
+**Cost model before emitting:** `predict(specs, leaves, options)` builds the layered IR and
+returns the source-level peak of simultaneously live values (the register-pressure predictor),
+temps and layer widths — without writing a file.
+
+**Command line:** `dendro-cascade <subcommand>` (or `python -m dendrosym.cascade`) — `compile
+<spec.py>` for any user spec plus the worked systems (`bssn`, `emda`, `bssn-looped`), the layering
+analysis (`autolayer`, `order-check`) and the object-level cost tools (`metrics`).
+`tests/cascade/run_all.py [--slow]` is the test suite.
+
+**Pinned sympy:** the emitted kernels depend on the sympy version (per-layer CSE output changes
+between releases — the code is still correct to machine precision, but not byte-reproducible).
+Regenerate under `requirements-cascade.txt` (sympy 1.13.3, `PYTHONHASHSEED=0`);
+`scripts/regen_vikr_kernels.sh` is the byte-identical regression oracle.
+
+**Used by the paper:** the kernels, ablations and cost model in *[CITATION PLACEHOLDER — David:
+paper title / arXiv id at submission]* were generated with this module; the deployed
+configuration is `simd="avx512", L=7, fused=True` with the BSSN `ssl`/`cahd` gauge terms.
+
 ---
 
 ## Legacy SymPyGR 
