@@ -1,57 +1,61 @@
 """__init__.py
 
 This is the initialization file for the DendroSym Python package.
-It helps us make sure that everything is ready to roll
+It helps us make sure that everything is ready to roll.
+
+Submodules are loaded lazily (PEP 562 ``__getattr__``): ``import dendrosym`` is
+cheap and pulls in nothing but the standard library, and ``dendrosym.nr``,
+``dendrosym.dtypes``, ``dendrosym.NRConfig`` ... resolve on first use exactly as
+they did when this file imported everything eagerly. The point is that the
+polynomial-cascade generator (``dendrosym.cascade``) depends only on sympy /
+numpy / networkx and must import in an environment without the solver
+toolkit's jinja2 / tomlkit / matplotlib / dill / tqdm.
 """
+import importlib
+import sys as _sys
 
-# the datatypes that includes all of the sympy pieces
-from . import dtypes
+# every submodule the eager __init__ used to import (same attribute names)
+_SUBMODULES = (
+    "dtypes",          # the datatypes that includes all of the sympy pieces
+    "nr",              # numerical relativity functions
+    "codegen",         # code generation
+    "params",          # parameter information
+    "memoryManager",   # the basic memory manager
+    "nxgraph",         # nxgraph generation
+    "refEl",           # reference element information
+    "utils",
+    "derivs",
+    "helpers",
+    "general_configs",
+    "nr_configs",
+    "code_printer",    # the code printer
+    "project_generator",  # project generator (template-based, replaces cog)
+    "gr_symbols",
+    "cascade",         # polynomial-cascade code generation (sympy-only)
+)
+# names re-exported from submodules
+_ATTRS = {
+    "DendroConfiguration": "general_configs",   # base configuration class
+    "NRConfig": "nr_configs",                   # the numerical relativity class
+    "DendroProjectGenerator": "project_generator",
+}
+# not imported (kept from the eager file's notes):
+#   sympy_cachesim -- does not work on some machines
+#   gw             -- not currently supported
+#   graph_coarsening
 
-# numerical relativity functions
-from . import nr
 
-# code generation
-from . import codegen
+def __getattr__(name):
+    if name in _SUBMODULES:
+        return importlib.import_module(f"{__name__}.{name}")
+    if name in _ATTRS:
+        mod = importlib.import_module(f"{__name__}.{_ATTRS[name]}")
+        return getattr(mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-# parameter information
-from . import params
 
-# ==== MISC. FUNCTIONS AND OPERATIONS ====
-# the basic memory manager
-from . import memoryManager
-
-# nxgraph generation
-from . import nxgraph
-
-# reference element information
-from . import refEl
-
-# sympy cache simulations
-# from . import sympy_cachesim
-# TODO: cachesim currently does not work on some machines
-
-from . import utils
-
-from . import params
-
-from . import derivs
-
-from . import helpers
-
-# ====== DENDRO CONFIGURATION ======
-# base configuration class
-from .general_configs import DendroConfiguration
-
-# and then the numerical relativity class
-from .nr_configs import NRConfig
-
-# the code printer also needs to be imported
-from . import code_printer
-
-# from .dendro_generator import DendroGenerator
-
-# project generator (template-based, replaces cog)
-from .project_generator import DendroProjectGenerator
+def __dir__():
+    return sorted(set(globals()) | set(_SUBMODULES) | set(_ATTRS))
 
 
 def run(config, default_output_dir=None, argv=None):
@@ -79,13 +83,14 @@ def run(config, default_output_dir=None, argv=None):
     """
     import argparse
     import os
-    import sys
+
+    from .project_generator import DendroProjectGenerator
 
     if argv is None:
-        argv = sys.argv[1:]
+        argv = _sys.argv[1:]
 
     ap = argparse.ArgumentParser(
-        prog=os.path.basename(sys.argv[0]) or "dendrosym.run",
+        prog=os.path.basename(_sys.argv[0]) or "dendrosym.run",
         description=f"generate the {config.project_name} solver")
     ap.add_argument("output_dir", nargs="?", default=None)
     ap.add_argument("--skip-gencode", action="store_true")
@@ -100,7 +105,7 @@ def run(config, default_output_dir=None, argv=None):
     CascadeOptions.add_argparse_args(ap, prefix="cascade-")
     ns, unknown = ap.parse_known_args(argv)
     if unknown:
-        print(f"dendrosym.run: ignoring unrecognized arguments {unknown}", file=sys.stderr)
+        print(f"dendrosym.run: ignoring unrecognized arguments {unknown}", file=_sys.stderr)
 
     skip = ns.skip_gencode
     if ns.profile is not None:
@@ -110,7 +115,6 @@ def run(config, default_output_dir=None, argv=None):
     # cascade overrides: CLI flags layer over whatever the config script registered
     if hasattr(config, "override_cascade"):
         specs = getattr(config, "stored_cascade_specs", {})
-        changes = {}
         for vt, (fn, opts) in list(specs.items()):
             new = CascadeOptions.from_namespace(ns, prefix="cascade-", base=opts)
             if ns.cascade is not None:
@@ -118,7 +122,7 @@ def run(config, default_output_dir=None, argv=None):
             specs[vt] = (fn, new)
         if ns.cascade and not specs:
             print("dendrosym.run: --cascade given but the config registered no cascade "
-                  "spec (set_cascade_spec_function)", file=sys.stderr)
+                  "spec (set_cascade_spec_function)", file=_sys.stderr)
 
     if ns.output_dir:
         output_dir = ns.output_dir
@@ -131,17 +135,9 @@ def run(config, default_output_dir=None, argv=None):
         output_dir = os.path.dirname(os.path.abspath(caller_file))
 
     print(f"Generating {config.project_name} solver into: {output_dir}",
-          file=sys.stderr)
+          file=_sys.stderr)
     gen = DendroProjectGenerator(config)
     gen.generate(output_dir, skip_gencode=skip, gencode_only=gencode_only)
 
-# TODO: the package that is used with gw is not currently supported!
-# from . import gw
-
-
-# TODO: quaternion and cachesym are not working on MaryLou currently
-
-
-# from . import graph_coarsening
 
 __version__ = "0.0.1"
