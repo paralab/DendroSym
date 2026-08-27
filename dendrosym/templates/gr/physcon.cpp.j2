@@ -55,8 +55,8 @@ void {{ project_name }}Constraints(double **uzipConsVars, const double **uZipVar
 #include "../gencode/{{ constraint_gencode.deriv_struct }}"
 {% endif %}
 {% if constraint_cascade is defined %}
-// polynomial-cascade SIMD kernel: macro set ({{ constraint_cascade.simd }}, {{ constraint_cascade.width }} lanes)
-#include "../gencode/{{ constraint_cascade.macros }}"
+// polynomial-cascade SIMD kernel: compile-time width selection (AVX-512 / AVX2 / flat fallback)
+#include "../gencode/{{ constraint_cascade.select }}"
 {% endif %}
 
 void {{ project_name }}physcon(double **unzipConsVars, const double **uZipVars,
@@ -113,13 +113,13 @@ void {{ project_name }}physcon(double **unzipConsVars, const double **uZipVars,
 
     // main constraint computation loop
 {% if constraint_cascade is defined %}
+#ifndef DENDRO_CASCADE_FLAT
     {
-        // -- polynomial cascade constraints ({{ constraint_cascade.simd }}, {{ constraint_cascade.width }} lanes) --
+        // -- polynomial cascade constraints (SIMD width chosen at compile time) --
         // same wrapper shape as the evolution RHS (see rhs.cpp): alias table, W-stride
         // rows with a masked partial batch. Coordinate leaves (x, y, z) are built per
         // batch in the prologue as lane vectors.
 #include "../gencode/{{ constraint_cascade.alias }}"
-        constexpr unsigned int __cascade_W = {{ constraint_cascade.width }};
         const unsigned int __cascade_i_lo = PW;
         const unsigned int __cascade_i_hi = nx - PW;
         // batches start at every W-th interior point of a row; the last (partial)
@@ -149,7 +149,8 @@ void {{ project_name }}physcon(double **unzipConsVars, const double **uZipVars,
         }
 #include "../gencode/{{ constraint_cascade.macros_undef }}"
     }
-{% else %}
+#else
+{% endif %}
     for (unsigned int k = PW; k < nz - PW; k++) {
         for (unsigned int j = PW; j < ny - PW; j++) {
             for (unsigned int i = PW; i < nx - PW; i++) {
@@ -165,6 +166,8 @@ void {{ project_name }}physcon(double **unzipConsVars, const double **uZipVars,
             }
         }
     }
+{% if constraint_cascade is defined %}
+#endif
 {% endif %}
 
     // cleanup

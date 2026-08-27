@@ -304,8 +304,12 @@ def t_bridge_emit():
     assert "const double __cascade_scalar_eta = eta;" in parts.alias
     assert "const VEC eta = VSET(__cascade_scalar_eta);" in parts.prologue
     assert "VSTORE(alpha_rhs+pp," in parts.body and "lambda_0 = VSET((double)(lambda[0]))" in parts.body
-    assert "#define VFNMADD" in parts.macros and "__AVX2__" in parts.macros
-    assert "#define VMASK" in parts.macros and "VLOADM(" in parts.body_tail
+    assert "#define VFNMADD" in parts.macros_avx2 and "__AVX2__" in parts.macros_avx2
+    assert "_mm512" in parts.macros_avx512 and "__AVX512F__" in parts.macros_avx512
+    assert "__AVX512F__" in parts.select and "DENDRO_CASCADE_FLAT" in parts.select
+    assert "toy_evolution_cascade_macros_avx512.cpp.inc" in parts.select
+    assert "#define VMASK" in parts.macros_avx2 and "VLOADM(" in parts.body_tail
+    assert parts.manifest["simd"] == "compile-time"
     assert parts.body_tail.count("VSTOREM(") == parts.body.count("VSTORE(") and "VLOAD(" not in parts.body_tail
     assert "#include" not in parts.macros_scalar and "#define VEC double" in parts.macros_scalar
     assert parts.manifest["outputs"] == ["alpha_rhs"] and parts.manifest["params"] == ["eta"]
@@ -332,22 +336,27 @@ def t_template_off_render():
     ctx = {"project_name": "toy", "namespace": "toy",
            "evolution_gencode": {"deriv_struct": "s.inc", "rhs_eqns": "r.inc"}}
     off = env.get_template("gr/rhs.cpp.j2").render(**ctx)
-    on = env.get_template("gr/rhs.cpp.j2").render(**ctx, evolution_cascade={
-        "simd": "avx2", "width": 4, "macros": "m.inc", "alias": "a.inc", "prologue": "p.inc",
-        "body": "b.inc", "body_tail": "bt.inc", "macros_scalar": "ms.inc", "macros_undef": "mu.inc"})
+    casc = {"simd": "compile-time", "select": "sel.inc", "alias": "a.inc", "prologue": "p.inc",
+            "body": "b.inc", "body_tail": "bt.inc", "macros_undef": "mu.inc"}
+    on = env.get_template("gr/rhs.cpp.j2").render(**ctx, evolution_cascade=casc)
     assert "cascade" not in off and '#include "../gencode/r.inc"' in off
-    assert "__cascade_W = 4" in on and '#include "../gencode/b.inc"' in on and "r.inc" not in on
+    # on-render: the cascade block under #ifndef DENDRO_CASCADE_FLAT, the flat loop under #else
+    assert "#ifndef DENDRO_CASCADE_FLAT" in on and '#include "../gencode/sel.inc"' in on
+    assert '#include "../gencode/b.inc"' in on and '#include "../gencode/r.inc"' in on
+    assert on.index("#ifndef DENDRO_CASCADE_FLAT") < on.index("b.inc") < on.index("#else") < on.index("r.inc") < on.index("#endif", on.index("#else"))
     assert "VMASK(__cascade_nvalid)" in on and '#include "../gencode/bt.inc"' in on
+    # the flat loop text is identical whether or not the cascade is present
+    flat_loop = off[off.index("    for (unsigned int k = PW;"):off.index("    toy::timer::t_rhs.stop()")]
+    assert flat_loop.endswith("    }\n") and flat_loop in on
     # constraint kernel: same branch in physcon.cpp.j2, keyed on constraint_cascade
     pctx = {"project_name": "toy", "namespace": "toy", "project_upper": "TOY",
             "constraint_gencode": {"deriv_struct": "cs.inc", "rhs_eqns": "cr.inc"},
             "evolution_var_extraction": "", "constraint_output_extraction": ""}
     poff = env.get_template("gr/physcon.cpp.j2").render(**pctx)
-    pon = env.get_template("gr/physcon.cpp.j2").render(**pctx, constraint_cascade={
-        "simd": "avx2", "width": 4, "macros": "m.inc", "alias": "a.inc", "prologue": "p.inc",
-        "body": "b.inc", "body_tail": "bt.inc", "macros_scalar": "ms.inc", "macros_undef": "mu.inc"})
+    pon = env.get_template("gr/physcon.cpp.j2").render(**pctx, constraint_cascade=casc)
     assert "cascade" not in poff and '#include "../gencode/cr.inc"' in poff
-    assert "__cascade_W = 4" in pon and "cr.inc" not in pon and "const double x = pmin[0]" not in pon
+    assert "#ifndef DENDRO_CASCADE_FLAT" in pon and '#include "../gencode/cr.inc"' in pon
+    assert pon.index("b.inc") < pon.index("#else") < pon.index("cr.inc")
     # the off-render must equal what the pre-cascade template produced: the
     # committed CCZ4 rhs.cpp (flat) is that reference when available.
     ref = pathlib.Path.home() / "research/ccz4-gr/solver/src/rhs.cpp"

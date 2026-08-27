@@ -124,6 +124,11 @@ def run(config, default_output_dir=None, argv=None):
             print("dendrosym.run: --cascade given but the config registered no cascade "
                   "spec (set_cascade_spec_function)", file=_sys.stderr)
 
+    if getattr(ns, "cascade-simd", None) is not None:
+        print("dendrosym.run: note -- the generated solver picks AVX-512 / AVX2 / flat at COMPILE "
+              "time from CPU_ARCH (CMake CASCADE_KERNEL to force one); --cascade-simd only affects "
+              "the standalone dendrosym.cascade API", file=_sys.stderr)
+
     if ns.output_dir:
         output_dir = ns.output_dir
     elif default_output_dir is not None:

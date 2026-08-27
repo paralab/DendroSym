@@ -35,7 +35,7 @@ from pathlib import Path
 import sympy as sym
 from sympy.core.function import AppliedUndef, UndefinedFunction
 
-CASCADE_BRIDGE_VERSION = "b3"   # b2: masked tail batches (body_tail); b3: hybrid tail + half-integer pow printer          # part of the gencode cache discriminator
+CASCADE_BRIDGE_VERSION = "b4"   # b4: compile-time width selection (select file);   # b2: masked tail batches (body_tail); b3: hybrid tail + half-integer pow printer          # part of the gencode cache discriminator
 CASCADE_TEMPLATE_SUPPORT = {"evolution", "constraint"}   # var_types whose template has the wrapper branch
 DERIV_FUNCS = ("grad", "grad2", "agrad", "kograd")
 COORD_LEAVES = ("x", "y", "z", "r_coord", "t")
@@ -64,11 +64,13 @@ class CascadeNamingError(ValueError):
 
 @dataclasses.dataclass
 class CascadeParts:
-    body: str
-    body_tail: str
+    body: str            # width-agnostic VEC body (what the engine emits)
+    body_tail: str       # same body with masked loads/stores (partial batches)
     alias: str
     prologue: str
-    macros: str
+    select: str          # compile-time ISA selection -> includes one macro set, defines __cascade_W
+    macros_avx2: str
+    macros_avx512: str
     macros_scalar: str
     macros_undef: str
     manifest: dict
@@ -214,19 +216,23 @@ def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
     if staged_names:
         raise NotImplementedError("cascade + staged/intermediate buffers is not supported")
 
+    # the VEC body is width-agnostic (only the macro set differs between AVX2 and
+    # AVX-512), so it is emitted ONCE and the wrapper picks the width at compile
+    # time. `options.simd` therefore does not affect solver output.
+    options = options.replace(simd="avx2")
     sig = kernel_signature(ir, options)
     members = struct_members(deriv_struct_text)
     out_fields = list(config.all_var_names.get(var_type, []))
     in_struct = config.input_struct_name()
     out_struct = config.output_struct_name(var_type)
-    W = options.width
 
     # --- header + body (the body is exactly what the engine emits for this IR)
     scalars = list(sig["scalars"])
     header = [
         f"// {project_name or config.project_name} {var_type} RHS via polynomial cascade "
         "-- IR-driven, SIMD-batched (dendrosym.cascade)",
-        f"// L = {len(ir.chunks)} chunks; simd={options.simd} ({W}-wide); "
+        f"// L = {len(ir.chunks)} chunks; width-agnostic VEC body (AVX2 4-wide / AVX-512 8-wide "
+        "chosen at compile time by the wrapper's select file); "
         f"inline_threshold={options.inline_threshold} fma_tree={options.fma_tree} "
         f"global_cse={options.global_cse} L={options.L} auto={options.auto}",
         "// Per-chunk CSE only; named tensors survive as chunk boundaries.",
@@ -303,28 +309,51 @@ def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
     if dup:
         raise CascadeNamingError(f"layer outputs shadow alias names: {dup[:10]}")
 
-    # --- macro sets --------------------------------------------------------
-    guard = {
+    # --- macro sets: one file per ISA + the compile-time selector -------------
+    guards = {
         "avx2": ["#if !defined(__AVX2__) || !defined(__FMA__)",
-                 '#error "cascade kernel generated for avx2: build with -mavx2 -mfma '
-                 '(CPU_ARCH in CMakeLists.txt)"', "#endif"],
+                 '#error "cascade AVX2 macro set needs -mavx2 -mfma (CPU_ARCH in CMakeLists.txt)"',
+                 "#endif"],
         "avx512": ["#if !defined(__AVX512F__)",
-                   '#error "cascade kernel generated for avx512: build with -mavx512f '
-                   '(CPU_ARCH in CMakeLists.txt)"', "#endif"],
-        "scalar": [],
-    }[options.simd]
-    macros = "\n".join([f"// cascade macro set: {options.simd} ({W}-wide) -- file scope"]
-                       + guard + macro_block(options.simd)) + "\n"
+                   '#error "cascade AVX-512 macro set needs -mavx512f (CPU_ARCH in CMakeLists.txt)"',
+                   "#endif"],
+    }
+    macros_avx2 = "\n".join(["// cascade macro set: avx2 (4-wide) -- file scope"]
+                            + guards["avx2"] + macro_block("avx2")) + "\n"
+    macros_avx512 = "\n".join(["// cascade macro set: avx512 (8-wide) -- file scope"]
+                              + guards["avx512"] + macro_block("avx512")) + "\n"
     macros_scalar = "\n".join(["// cascade width-1 macro set (VEC = double); usable inside a function"]
                               + scalar_macro_block()) + "\n"
-    macros_undef = "\n".join(["// cascade macro cleanup"] + undef_block()) + "\n"
+    macros_undef = "\n".join(["// cascade macro cleanup"] + undef_block()
+                             + ["#undef __cascade_W"]) + "\n"
+    fn = cascade_filenames(project_name or config.project_name, var_type)
+    select = "\n".join([
+        "// cascade kernel selection (compile time). Follows the target ISA -- CPU_ARCH sets",
+        "// -march, the compiler defines __AVX512F__ / __AVX2__+__FMA__ -- unless forced by",
+        "// the CMake option CASCADE_KERNEL=flat|avx2|avx512 (DENDRO_CASCADE_FORCE_*).",
+        "// With no usable SIMD the flat CSE kernel is compiled instead (DENDRO_CASCADE_FLAT).",
+        "#undef DENDRO_CASCADE_FLAT",
+        "#undef __cascade_W",
+        "#if defined(DENDRO_CASCADE_FORCE_FLAT)",
+        "#  define DENDRO_CASCADE_FLAT 1",
+        "#elif defined(DENDRO_CASCADE_FORCE_AVX512) || "
+        "(!defined(DENDRO_CASCADE_FORCE_AVX2) && defined(__AVX512F__))",
+        f'#  include "{fn["macros_avx512"]}"',
+        "#  define __cascade_W 8u",
+        "#elif defined(DENDRO_CASCADE_FORCE_AVX2) || (defined(__AVX2__) && defined(__FMA__))",
+        f'#  include "{fn["macros_avx2"]}"',
+        "#  define __cascade_W 4u",
+        "#else",
+        "#  define DENDRO_CASCADE_FLAT 1",
+        "#endif",
+    ]) + "\n"
 
     manifest = {
         "bridge_version": CASCADE_BRIDGE_VERSION,
         "project": project_name or config.project_name,
         "var_type": var_type,
         "options": {k: v for k, v in dataclasses.asdict(options).items()},
-        "simd": options.simd, "width": W,
+        "simd": "compile-time", "widths": {"avx2": 4, "avx512": 8},
         "layers": [(c.name, c.n_temps, len(c.outputs), c.n_prior_refs) for c in ir.chunks],
         "pp_arrays": list(sig["pp_arrays"]),
         "idx_consts": [[b, i] for b, i in sig["idx_consts"]],
@@ -341,7 +370,8 @@ def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
         alias="\n".join(["// cascade alias table (generated): vikr leaf/output names -> Dendro-6 storage"]
                         + list(alias.values())) + "\n",
         prologue="\n".join(["// cascade per-batch prologue (generated)"] + prologue) + "\n",
-        macros=macros, macros_scalar=macros_scalar, macros_undef=macros_undef,
+        select=select, macros_avx2=macros_avx2, macros_avx512=macros_avx512,
+        macros_scalar=macros_scalar, macros_undef=macros_undef,
         manifest=manifest,
     )
 
@@ -349,7 +379,8 @@ def emit_config_cascade(ir, options, *, config, var_type, deriv_struct_text,
 # ---------------------------------------------------------------------------
 # files + template context
 # ---------------------------------------------------------------------------
-FILE_KEYS = ("body", "body_tail", "alias", "prologue", "macros", "macros_scalar", "macros_undef", "manifest")
+FILE_KEYS = ("body", "body_tail", "alias", "prologue", "select", "macros_avx2", "macros_avx512",
+             "macros_scalar", "macros_undef", "manifest")
 
 
 def cascade_filenames(prefix: str, var_type: str) -> dict:
@@ -370,7 +401,7 @@ def write_cascade_files(gencode_dir, prefix: str, var_type: str, parts: CascadeP
 
 def cascade_ctx(files: dict, options) -> dict:
     """The ``ctx[f"{vt}_cascade"]`` dict the rhs.cpp.j2 branch reads."""
-    return {"simd": options.simd, "width": options.width, **files}
+    return {"simd": "compile-time", **files}
 
 
 # ---------------------------------------------------------------------------
@@ -388,7 +419,6 @@ def emit_verification_harness(manifest_path, gencode_dir, out_cpp, n_points=4099
     prefix, vt = m["project"], m["var_type"]
     files = cascade_filenames(prefix, vt)
     flat = gencode_dir / f"{prefix}_{vt}_rhs_eqns.cpp.inc"
-    W = m["width"]
     unit = {"alpha", "chi"} | {f for f in m["in_names"] if re.fullmatch(r"gt(00|11|22)", f)}
     idx_bases = {}
     for b, i in m["idx_consts"]:
@@ -396,7 +426,10 @@ def emit_verification_harness(manifest_path, gencode_dir, out_cpp, n_points=4099
     L = []
     L += ["// AUTO-GENERATED by dendrosym.cascade.dendro_bridge.emit_verification_harness",
           "#include <cmath>", "#include <cstdio>", "#include <cstdlib>", "#include <vector>",
-          f'#include "{gencode_dir / files["macros"]}"', "",
+          f'#include "{gencode_dir / files["select"]}"',
+          "#ifdef DENDRO_CASCADE_FLAT",
+          '#error "harness: build with -mavx2 -mfma (and -mavx512f for the 8-wide check)"',
+          "#endif", "",
           "static unsigned long long _s = 88172645463325252ULL;",
           "static double urand() { _s ^= _s << 13; _s ^= _s >> 7; _s ^= _s << 17;"
           " return (double)(_s % 2000001) / 1000000.0 - 1.0; }", "",
@@ -429,7 +462,6 @@ def emit_verification_harness(manifest_path, gencode_dir, out_cpp, n_points=4099
     # cascade (same shape as the rhs.cpp.j2 branch, one row of N points)
     L += ["    out = out_casc;", "    {",
           f'#include "{gencode_dir / files["alias"]}"',
-          f"        constexpr unsigned int __cascade_W = {W};",
           "        const unsigned int __cascade_i_lo = 0, __cascade_i_hi = N;",
           "        for (unsigned int i = __cascade_i_lo; i < __cascade_i_hi; i += __cascade_W) {",
           "            const unsigned int __cascade_nvalid = (__cascade_i_hi - i < __cascade_W)"
@@ -485,15 +517,23 @@ def _main(argv=None):
     print(f"wrote {cpp}")
     if not ns.run:
         return 0
-    isa = {"avx2": ["-mavx2", "-mfma"], "avx512": ["-mavx512f", "-mfma"], "scalar": []}[m["simd"]]
+    # every width the host can run: AVX2 always (-O3 and -O0), AVX-512 when the CPU has it
+    variants = [("avx2", "-O3", ["-mavx2", "-mfma", "-DDENDRO_CASCADE_FORCE_AVX2"]),
+                ("avx2", "-O0", ["-mavx2", "-mfma", "-DDENDRO_CASCADE_FORCE_AVX2"])]
+    try:
+        host_avx512 = "avx512f" in Path("/proc/cpuinfo").read_text()
+    except OSError:
+        host_avx512 = False
+    if host_avx512:
+        variants.append(("avx512", "-O3", ["-mavx512f", "-mavx2", "-mfma"]))
     rc = 0
-    for opt in ("-O3", "-O0"):
-        exe = out_dir / f"check{opt}"
-        cmd = [ns.cxx, opt, *isa, "-std=c++17", str(cpp), "-o", str(exe)]
+    for isa, opt, flags in variants:
+        exe = out_dir / f"check-{isa}{opt}"
+        cmd = [ns.cxx, opt, *flags, "-std=c++17", str(cpp), "-o", str(exe)]
         print("$", " ".join(cmd))
         subprocess.run(cmd, check=True)
         r = subprocess.run([str(exe)], capture_output=True, text=True)
-        print(r.stdout.strip().splitlines()[-1], f"[{opt}]")
+        print(r.stdout.strip().splitlines()[-1], f"[{isa} {opt}]")
         rc |= r.returncode
     return rc
 

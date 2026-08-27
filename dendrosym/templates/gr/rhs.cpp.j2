@@ -64,8 +64,8 @@ void {{ project_name }}RHS(double **uzipVarsRHS, const double **uZipVars,
 #include "../gencode/{{ evolution_gencode.deriv_struct }}"
 {% endif %}
 {% if evolution_cascade is defined %}
-// polynomial-cascade SIMD kernel: macro set ({{ evolution_cascade.simd }}, {{ evolution_cascade.width }} lanes)
-#include "../gencode/{{ evolution_cascade.macros }}"
+// polynomial-cascade SIMD kernel: compile-time width selection (AVX-512 / AVX2 / flat fallback)
+#include "../gencode/{{ evolution_cascade.select }}"
 {% endif %}
 
 void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
@@ -146,14 +146,14 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
     // all the CSE-optimized code with DENDRO_nnnn temporaries.
     {{ namespace }}::timer::t_rhs.start();
 {% if evolution_cascade is defined %}
+#ifndef DENDRO_CASCADE_FLAT
     {
-        // -- polynomial cascade RHS ({{ evolution_cascade.simd }}, {{ evolution_cascade.width }} lanes) --
+        // -- polynomial cascade RHS (SIMD width chosen at compile time, see the select file) --
         // the body is the cascade engine's VEC kernel; the alias table maps its
         // bare names onto in./d./out.; rows are walked W points at a time with a
         // rows are walked W points at a time; the partial batch at the end of a row
         // uses masked loads/stores (see the loop comment).
 #include "../gencode/{{ evolution_cascade.alias }}"
-        constexpr unsigned int __cascade_W = {{ evolution_cascade.width }};
         const unsigned int __cascade_i_lo = PW;
         const unsigned int __cascade_i_hi = nx - PW;
         // batches start at every W-th interior point of a row; the last (partial)
@@ -183,7 +183,8 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
         }
 #include "../gencode/{{ evolution_cascade.macros_undef }}"
     }
-{% else %}
+#else
+{% endif %}
     for (unsigned int k = PW; k < nz - PW; k++) {
         for (unsigned int j = PW; j < ny - PW; j++) {
             for (unsigned int i = PW; i < nx - PW; i++) {
@@ -200,6 +201,8 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
             }
         }
     }
+{% if evolution_cascade is defined %}
+#endif
 {% endif %}
     {{ namespace }}::timer::t_rhs.stop();
 

@@ -30,7 +30,8 @@ set(CPU_ARCH_STRINGS
     "native"
     "znver1" "znver2" "znver3" "znver4"
     "haswell" "broadwell" "skylake-avx512" "cascadelake" "icelake-server"
-    "generic_avx2" "x86-64-v3"
+    "sapphirerapids" "emeraldrapids" "graniterapids"
+    "generic_avx2" "x86-64-v3" "x86-64-v4"
 )
 set_property(CACHE CPU_ARCH PROPERTY STRINGS ${CPU_ARCH_STRINGS})
 
@@ -48,6 +49,23 @@ add_compile_options(${ARCH_FLAGS})
 
 message(STATUS "Build Target Architecture: ${CPU_ARCH}")
 message(STATUS "Compiler Flags: ${ARCH_FLAGS}")
+
+# polynomial-cascade RHS kernel width. auto = follow the target ISA that CPU_ARCH
+# enables (AVX-512 if __AVX512F__, else AVX2 if __AVX2__ && __FMA__, else the flat
+# CSE kernel). Force one for A/B tests; a forced width the target lacks fails to
+# compile (the macro file #errors) rather than crashing at run time.
+set(CASCADE_KERNEL "auto" CACHE STRING "Cascade RHS kernel: auto|flat|avx2|avx512")
+set_property(CACHE CASCADE_KERNEL PROPERTY STRINGS "auto" "flat" "avx2" "avx512")
+if(CASCADE_KERNEL STREQUAL "flat")
+  add_compile_definitions(DENDRO_CASCADE_FORCE_FLAT)
+elseif(CASCADE_KERNEL STREQUAL "avx2")
+  add_compile_definitions(DENDRO_CASCADE_FORCE_AVX2)
+elseif(CASCADE_KERNEL STREQUAL "avx512")
+  add_compile_definitions(DENDRO_CASCADE_FORCE_AVX512)
+elseif(NOT CASCADE_KERNEL STREQUAL "auto")
+  message(FATAL_ERROR "Unknown CASCADE_KERNEL: ${CASCADE_KERNEL}")
+endif()
+message(STATUS "Cascade kernel selection: ${CASCADE_KERNEL}")
 
 # sanitizers for debug builds
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
