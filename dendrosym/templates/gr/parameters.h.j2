@@ -211,6 +211,11 @@ extern std::string {{ project_upper }}_INMATFILT_SECOND;
 extern std::vector<double> {{ project_upper }}_INMATFILT_FIRST_COEFFS;
 extern std::vector<double> {{ project_upper }}_INMATFILT_SECOND_COEFFS;
 extern std::string {{ project_upper }}_POST_RHS_FILTER;
+// fused in-kernel stencils: a runtime request, not a guarantee. Only explicit
+// local stencils can be inlined into the RHS body -- a compact/matrix engine
+// derivative is a banded solve along a whole line -- so the solver degrades to
+// the precomputed derivative pass when the engine cannot honour it.
+extern bool {{ project_upper }}_USE_FUSED_STENCILS;
 {% endif %}
 
 // -----------------------------------------------------------------

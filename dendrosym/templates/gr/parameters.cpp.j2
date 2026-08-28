@@ -219,6 +219,7 @@ unsigned int {{ project_upper }}_ID_TYPE = 0;
 std::unique_ptr<dendroderivs::DendroDerivatives> {{ project_upper }}_DERIVS = nullptr;
 std::string {{ project_upper }}_DERIVTYPE_FIRST = "E6";
 std::string {{ project_upper }}_DERIVTYPE_SECOND = "E6";
+bool {{ project_upper }}_USE_FUSED_STENCILS = true;
 std::vector<double> {{ project_upper }}_DERIV_FIRST_COEFFS = {};
 std::vector<double> {{ project_upper }}_DERIV_SECOND_COEFFS = {};
 unsigned int {{ project_upper }}_DERIV_FIRST_MATID = 1;
@@ -763,6 +764,8 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     READ_OPTIONAL("derivatives", "filter_first", {{ project_upper }}_INMATFILT_FIRST);
     READ_OPTIONAL("derivatives", "filter_second", {{ project_upper }}_INMATFILT_SECOND);
     READ_OPTIONAL("derivatives", "post_rhs_filter", {{ project_upper }}_POST_RHS_FILTER);
+    READ_OPTIONAL("derivatives", "use_fused_stencils",
+                  {{ project_upper }}_USE_FUSED_STENCILS);
 
     {{ project_upper }}_DERIVS = std::make_unique<dendroderivs::DendroDerivatives>(
         {{ project_upper }}_DERIVTYPE_FIRST, {{ project_upper }}_DERIVTYPE_SECOND,
@@ -862,6 +865,8 @@ void dumpParamFile(std::ostream& sout, int root, MPI_Comm comm) {
     sout << "\n[derivatives]" << std::endl;
     sout << "type_first = \"" << {{ project_upper }}_DERIVTYPE_FIRST << "\"" << std::endl;
     sout << "type_second = \"" << {{ project_upper }}_DERIVTYPE_SECOND << "\"" << std::endl;
+    sout << "use_fused_stencils = "
+         << ({{ project_upper }}_USE_FUSED_STENCILS ? "true" : "false") << std::endl;
 {% endif %}
 
     // [physics]: generated from the equation config's ParameterVariables, so a

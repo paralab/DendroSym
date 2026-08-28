@@ -109,24 +109,39 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
     const unsigned int PW = {{ namespace }}::{{ project_upper }}_PADDING_WIDTH;
 {% if evolution_cascade is defined and evolution_cascade.fused %}
 #ifndef DENDRO_CASCADE_FLAT
-    // fused stencils are the explicit 6th-order centered ones (half-width 3): refuse
-    // to run silently against a different derivative engine or a narrower padding.
-    {
-        static bool __cascade_fused_checked = false;
-        if (!__cascade_fused_checked) {
-            if ({{ namespace }}::{{ project_upper }}_DERIVTYPE_FIRST != "E6" ||
-                {{ namespace }}::{{ project_upper }}_DERIVTYPE_SECOND != "E6" || PW < 3) {
-                std::cerr << "[cascade] fused stencils require derivatives.type_first/type_second = "
-                             "\"E6\" and a padding width >= 3 (got "
-                          << {{ namespace }}::{{ project_upper }}_DERIVTYPE_FIRST << ", "
-                          << {{ namespace }}::{{ project_upper }}_DERIVTYPE_SECOND << ", PW=" << PW
-                          << "); regenerate without --cascade-fused or build with -DCASCADE_KERNEL=flat"
-                          << std::endl;
-                MPI_Abort(MPI_COMM_WORLD, 1);
-            }
-            __cascade_fused_checked = true;
+    // Fused stencils inline the explicit 6th-order centered operators (half-width 3)
+    // into the RHS body. That is only possible for a LOCAL stencil: a compact/matrix
+    // engine's derivative is a banded solve along a whole grid line, so there is
+    // nothing to inline. Both paths are compiled in (the precomputed one already
+    // serves boundary blocks), so an engine that cannot honour fusion degrades to it
+    // rather than failing -- which also makes fused-vs-precomputed a parfile knob
+    // (`[derivatives] use_fused_stencils`) instead of a regeneration.
+    //
+    // The two paths are NOT bit-identical (the inline stencils associate differently),
+    // so which one ran must never be ambiguous: it is reported once per run.
+    static const bool __cascade_fused = [] {
+        const bool e6 = {{ namespace }}::{{ project_upper }}_DERIVTYPE_FIRST == "E6" &&
+                        {{ namespace }}::{{ project_upper }}_DERIVTYPE_SECOND == "E6";
+        const bool wide = {{ namespace }}::{{ project_upper }}_PADDING_WIDTH >= 3;
+        const bool want = {{ namespace }}::{{ project_upper }}_USE_FUSED_STENCILS;
+        const bool on = want && e6 && wide;
+        int __rank = 0;
+        MPI_Comm_rank(MPI_COMM_WORLD, &__rank);
+        if (!__rank) {
+            std::cout << "[cascade] interior-block derivatives: "
+                      << (on ? "FUSED (inline stencils)" : "precomputed pass")
+                      << " -- type_first=" << {{ namespace }}::{{ project_upper }}_DERIVTYPE_FIRST
+                      << " type_second=" << {{ namespace }}::{{ project_upper }}_DERIVTYPE_SECOND
+                      << " pw=" << {{ namespace }}::{{ project_upper }}_PADDING_WIDTH
+                      << " use_fused_stencils=" << (want ? "true" : "false");
+            if (want && !on)
+                std::cout << " [fusion requested but unavailable: "
+                          << (e6 ? "" : "engine is not an explicit E6 local stencil; ")
+                          << (wide ? "" : "padding width < 3; ") << "using the precomputed pass]";
+            std::cout << std::endl;
         }
-    }
+        return on;
+    }();
 #endif
 {% endif %}
     unsigned int n = sz[0] * sz[1] * sz[2];
@@ -168,7 +183,7 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
     // fused cascade: interior blocks compute their 1st/pure-2nd derivatives inside the
     // kernel, so only the mixed seconds (and the firsts they read) are precomputed.
     // boundary blocks keep the full pass (the engine's one-sided stencils there).
-    if (bflag == 0) {
+    if (bflag == 0 && __cascade_fused) {
 #include "../gencode/{{ evolution_cascade.deriv_calc_fused }}"
     } else
 #endif
@@ -221,7 +236,7 @@ void {{ project_name }}rhs(double **unzipVarsRHS, const double **uZipVars,
         const unsigned int __cascade_i_lo = PW;
         const unsigned int __cascade_i_hi = nx - PW;
 {% if evolution_cascade.fused %}
-        if (bflag == 0) {
+        if (bflag == 0 && __cascade_fused) {
             // interior block: fused body (inline 1st/pure-2nd stencils)
 {{ cascade_loop(evolution_cascade.body_fused, evolution_cascade.body_fused_tail) }}
         } else {
