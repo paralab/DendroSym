@@ -103,7 +103,7 @@ def _emit_deriv_calc(calc: str, use_grad_set: bool, label: str) -> str:
 
 # bump when the gencode pipeline changes in a way that invalidates old caches
 # (e.g. changing the printer, CSE settings, .cpp.inc layout, or bcs/ko emission)
-_CACHE_SCHEMA_VERSION = "v17"
+_CACHE_SCHEMA_VERSION = "v18"
 
 
 def _vt_worker_init(inner_workers):
@@ -137,10 +137,11 @@ def _vt_cache_key(config, vt):
     # that never stage.
     if not getattr(config, "replace_and_expand_derivatives", True):
         parts.append("staged_compound_derivs")
-    # planned per-variable derivative sets change deriv_calc only; conditional so
-    # the batched-dispatch default keeps its keys (golden cache-hits intact).
-    if getattr(config, "use_grad_set", False):
-        parts.append("grad_set_deriv_calc")
+    # planned per-variable derivative sets are the default; a solver that opts
+    # back out to per-operator batches emits a different deriv_calc, so it keys
+    # distinctly rather than colliding with the default.
+    if not getattr(config, "use_grad_set", True):
+        parts.append("batched_deriv_calc")
     # a registered+enabled cascade ADDS kernel files for the same equations, so
     # it keys distinctly (options + bridge version). Solvers without one keep
     # their existing keys (golden cache-hits intact).
@@ -219,7 +220,7 @@ def _run_var_type(args):
     merges back.
     """
     config, vt, prefix, gencode_dir_str, deriv_obj_name, use_advective = args
-    use_grad_set = getattr(config, "use_grad_set", False)
+    use_grad_set = getattr(config, "use_grad_set", True)
     gencode_dir = Path(gencode_dir_str)
 
     print(f"  processing {vt}...", file=sys.stderr)
