@@ -76,6 +76,26 @@ def _rewrite_deriv_calls(code: str, deriv_obj: str,
     return code
 
 
+def _emit_deriv_calc(calc: str, use_grad_set: bool, label: str) -> str:
+    """Choose the deriv-calc dispatch form: planned sets or operator batches.
+
+    `grad_set` hands the engine the whole per-variable derivative SET, so it can
+    pick each call's shape (active-region `_last` kernels for terminal outputs);
+    the operator-batched form cannot, because it does not know which outputs are
+    terminal. Falls back with a note when the call list has calls whose chain
+    grad_set cannot plan (staged/intermediate derivatives), whose padding the
+    intermediate expression loop reads anyway.
+    """
+    if use_grad_set:
+        planned = dendrosym.codegen.emit_deriv_calc_grad_set(calc)
+        if planned is not None:
+            return planned
+        print(f"    grad_set: {label} has calls the planner cannot resolve "
+              "(staged/intermediate derivatives) -- using batched dispatch",
+              file=sys.stderr)
+    return dendrosym.codegen.group_deriv_calc(calc)
+
+
 # ---------------------------------------------------------------------------
 # Per-var_type worker (runs in a subprocess for parallel gencode)
 # ---------------------------------------------------------------------------
@@ -117,6 +137,10 @@ def _vt_cache_key(config, vt):
     # that never stage.
     if not getattr(config, "replace_and_expand_derivatives", True):
         parts.append("staged_compound_derivs")
+    # planned per-variable derivative sets change deriv_calc only; conditional so
+    # the batched-dispatch default keeps its keys (golden cache-hits intact).
+    if getattr(config, "use_grad_set", False):
+        parts.append("grad_set_deriv_calc")
     # a registered+enabled cascade ADDS kernel files for the same equations, so
     # it keys distinctly (options + bridge version). Solvers without one keep
     # their existing keys (golden cache-hits intact).
@@ -195,6 +219,7 @@ def _run_var_type(args):
     merges back.
     """
     config, vt, prefix, gencode_dir_str, deriv_obj_name, use_advective = args
+    use_grad_set = getattr(config, "use_grad_set", False)
     gencode_dir = Path(gencode_dir_str)
 
     print(f"  processing {vt}...", file=sys.stderr)
@@ -292,7 +317,7 @@ def _run_var_type(args):
     _deriv_calc_percall = deriv_calc
     # regroup into per-axis first-derivative tables (the batch-dispatch seam);
     # bit-identical -- independent first derivs commute, seconds stay ordered.
-    deriv_calc = dendrosym.codegen.group_deriv_calc(deriv_calc)
+    deriv_calc = _emit_deriv_calc(deriv_calc, use_grad_set, vt)
 
     # buffer count for this var_type -> sizes NUM_DERIVATIVES (max over vts)
     num_derivs = dendrosym.codegen.count_deriv_buffers(deriv_alloc)
@@ -353,7 +378,7 @@ def _run_var_type(args):
                 raise NotImplementedError(
                     f"cascade fused={vt}: the deriv pass has calls the reducer does not "
                     "recognize (staged/intermediate derivatives); fusion is not supported here")
-            deriv_calc_fused = dendrosym.codegen.group_deriv_calc(red[0])
+            deriv_calc_fused = _emit_deriv_calc(red[0], use_grad_set, f"{vt} (fused)")
             print(f"    fused: deriv pass keeps {red[1]} of {red[1] + red[2]} stencil calls "
                   f"on interior blocks", file=sys.stderr)
         parts = _cb.emit_config_cascade(

@@ -108,6 +108,13 @@ class DendroConfiguration:
         # by default we also want to pull the derivatives from the derivative workspace
         self.use_deriv_workspace = True
 
+        # deriv-calc dispatch form. False: per-operator `grad_*_batch` calls.
+        # True: one planned `grad_set` per variable stating the whole derivative
+        # SET, letting the engine choose each call's shape (terminal outputs run
+        # the active-region `_last` kernels). Needs a dendrolib with
+        # DendroDerivatives::grad_set. CLI: `python <cfg>.py --grad-set`.
+        self.use_grad_set = False
+
 
     def set_idx_str(self, idx_str):
         """Store the string used for indexing into the variables

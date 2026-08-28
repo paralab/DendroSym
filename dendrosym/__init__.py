@@ -79,6 +79,10 @@ def run(config, default_output_dir=None, argv=None):
         --cascade-<knob>  override one CascadeOptions field, e.g. --cascade-simd
                           avx512 --cascade-L 7 --cascade-no-fma-tree (see
                           dendrosym.cascade.CascadeOptions; --help lists them)
+        --grad-set / --no-grad-set
+                          emit the deriv pass as one planned DendroDerivatives::
+                          grad_set per variable (the engine picks each call's
+                          shape) instead of per-operator grad_*_batch calls
         <positional>      output directory (defaults to caller's __file__ dir)
     """
     import argparse
@@ -101,6 +105,9 @@ def run(config, default_output_dir=None, argv=None):
     ap.add_argument("--cascade", dest="cascade", action="store_true", default=None,
                     help="emit the polynomial-cascade kernel (registered specs)")
     ap.add_argument("--no-cascade", dest="cascade", action="store_false")
+    ap.add_argument("--grad-set", dest="grad_set", action="store_true", default=None,
+                    help="emit planned per-variable derivative sets (DendroDerivatives::grad_set)")
+    ap.add_argument("--no-grad-set", dest="grad_set", action="store_false")
     from dendrosym.cascade.options import CascadeOptions
     CascadeOptions.add_argparse_args(ap, prefix="cascade-")
     ns, unknown = ap.parse_known_args(argv)
@@ -110,6 +117,8 @@ def run(config, default_output_dir=None, argv=None):
     skip = ns.skip_gencode
     if ns.profile is not None:
         config.enable_profiling = ns.profile
+    if ns.grad_set is not None:
+        config.use_grad_set = ns.grad_set
     gencode_only = ns.gencode_only
 
     # cascade overrides: CLI flags layer over whatever the config script registered

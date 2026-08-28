@@ -646,6 +646,169 @@ def group_deriv_calc(calc: str) -> str:
     return "\n".join(out) + tail
 
 
+
+# ---------------------------------------------------------------------------
+# planned per-variable derivative sets (DendroDerivatives::grad_set)
+# ---------------------------------------------------------------------------
+
+_DERIVS_TYPE = "dendroderivs::DendroDerivatives"
+# DerivSet aggregate-initializer positions. C++17 has no designated
+# initializers, so unused slots are emitted as explicit nullptr.
+_DERIV_SET_MEMBERS = ("x", "y", "z", "xx", "yy", "zz", "xy", "xz", "yz")
+# a first derivative chained into a mixed second: (op, source axis) -> member
+_MIXED_FROM_CHAIN = {("y", "x"): "xy", ("z", "x"): "xz", ("z", "y"): "yz"}
+_ADV_CALL_PAT = regex.compile(r"\badv_deriv_[xyz]\(")
+
+
+_MASK_ALIASES = (
+    ("DM_ALL", _DERIV_SET_MEMBERS),
+    ("DM_FIRST", ("x", "y", "z")),
+    ("DM_SECOND", ("xx", "yy", "zz")),
+    ("DM_MIXED", ("xy", "xz", "yz")),
+)
+
+
+def _mask_names(mask):
+    """Name a mask with the engine's aliases where a whole family is present."""
+    left = set(mask)
+    names = []
+    for alias, family in _MASK_ALIASES:
+        if left.issuperset(family):
+            names.append(alias)
+            left.difference_update(family)
+            if not left:
+                return names
+    names.extend(f"DM_{m.upper()}" for m in _DERIV_SET_MEMBERS if m in left)
+    return names
+
+
+def _parse_deriv_sets(calc: str):
+    """Reconstruct per-variable derivative sets from the per-call deriv list.
+
+    Keys off the CALL GRAPH, never off buffer names: a mixed second is
+    `grad_{y,z}(dst, S)` where `S` is the output of an earlier first-derivative
+    call, and its member follows from (operator, that call's axis). Buffer names
+    can contain underscores, so splitting them would be unsound.
+
+    Returns (obj, [(src, {member: buffer}), ...], steps, passthrough), or None
+    if a line is not a recognized call whose chain resolves -- staged /
+    intermediate solvers, where the caller must fall back.
+    """
+    obj = None
+    sets, order = {}, []
+    axis_of = {}        # first-derivative dst buffer -> (src, axis)
+    steps = {}          # axis -> step symbol (hx/hy/hz)
+    passthrough = []    # advective calls, kept verbatim
+
+    for ln in calc.splitlines():
+        if not ln.strip():
+            continue
+        m = _DERIV_CALL_PAT.match(ln)
+        if not m:
+            # advective derivatives read `in.X` and write their own agrad
+            # buffers -- they neither feed nor consume a set, so keep them.
+            if _ADV_CALL_PAT.search(ln):
+                passthrough.append(ln)
+                continue
+            return None
+        this_obj, op, dst, src, h = m.groups()
+        obj = obj or this_obj
+
+        if src.startswith("in."):
+            member, axis = op, op[0]
+            if op in ("x", "y", "z"):
+                axis_of[dst] = (src, op)
+        else:
+            base = axis_of.get(src)
+            if base is None:
+                return None                 # staged buffer or unseen chain
+            src, src_axis = base
+            member = _MIXED_FROM_CHAIN.get((op, src_axis))
+            if member is None:
+                return None                 # chain shape grad_set cannot plan
+            axis = op[0]
+
+        if src not in sets:
+            sets[src] = {}
+            order.append(src)
+        if member in sets[src]:
+            return None                     # two writers for one output
+        sets[src][member] = dst
+        steps.setdefault(axis, h)
+
+    if not sets:
+        return None
+    return obj, [(s, sets[s]) for s in order], steps, passthrough
+
+
+def emit_deriv_calc_grad_set(calc: str):
+    """Emit the deriv-calc as planned `grad_set` / `grad_set_batch` calls.
+
+    One call per variable states WHICH derivatives the RHS uses (a DerivMask)
+    and where each goes; the engine plans every call's shape from that --
+    terminal outputs run the active-region `_last` kernels, a first derivative
+    feeding a mixed one stays a full-extent intermediate and is reused. That is
+    the win: a hand-emitted call list cannot use `_last`, because it does not
+    know which outputs are terminal.
+
+    Variables sharing a mask go through one `grad_set_batch`. Phase ordering
+    disappears: a mixed second only ever chains off its OWN variable's first
+    derivative, which `grad_set` handles internally.
+
+    CONTRACT: `_last` leaves the block padding undefined, so nothing may read a
+    derivative buffer outside [pw, n-pw)^3. The RHS/BC/cascade loops comply; the
+    staged-intermediate loop does not, which is why that path returns None.
+
+    Returns None when the chain cannot be resolved -- caller falls back to
+    `group_deriv_calc`.
+    """
+    parsed = _parse_deriv_sets(calc)
+    if parsed is None:
+        return None
+    obj, sets, steps, passthrough = parsed
+
+    # group by mask; first-seen order (the deriv lists are fully sorted, so this
+    # is deterministic across PYTHONHASHSEED)
+    groups, gorder = {}, []
+    for src, members in sets:
+        mask = tuple(m for m in _DERIV_SET_MEMBERS if m in members)
+        if mask not in groups:
+            groups[mask] = []
+            gorder.append(mask)
+        groups[mask].append((src, members))
+
+    hx, hy, hz = (steps.get(a, "h" + a) for a in ("x", "y", "z"))
+    out = ["// planned per-variable derivative sets -- the engine picks each",
+           "// call's shape (terminal outputs use the active-region kernels)",
+           f"using __DD = {_DERIVS_TYPE};"]
+    for k, mask in enumerate(gorder):
+        rows = groups[mask]
+        mask_expr = " | ".join(f"__DD::{n}" for n in _mask_names(mask))
+        # trailing all-null slots are left to the struct's defaults
+        keep = max(_DERIV_SET_MEMBERS.index(m) for m in mask) + 1
+        cols = _DERIV_SET_MEMBERS[:keep]
+        out.append("{")
+        out.append(f"    const __DD::DerivSet __ds{k}[] = {{"
+                   f"   // {', '.join(cols)}")
+        for _src, members in rows:
+            row = ", ".join(members.get(m, "nullptr") for m in cols)
+            out.append(f"        {{ {row} }},")
+        out.append("    };")
+        out.append("    const double *const __du{}[] = {{ {} }};".format(
+            k, ", ".join(src for src, _m in rows)))
+        if len(rows) == 1:
+            out.append(f"    {obj}.grad_set(__ds{k}[0], __du{k}[0], {mask_expr},")
+            out.append(f"    {' ' * len(obj)}              {hx}, {hy}, {hz}, sz, bflag);")
+        else:
+            out.append(f"    {obj}.grad_set_batch(__ds{k}, __du{k}, {len(rows)},"
+                       f" {mask_expr},")
+            out.append(f"    {' ' * len(obj)}                    {hx}, {hy}, {hz}, sz, bflag);")
+        out.append("}")
+    out.extend(passthrough)
+    tail = "\n" if calc.endswith("\n") else ""
+    return "\n".join(out) + tail
+
+
 def count_deriv_buffers(memalloc_code: str) -> int:
     """Count the `T *NAME = deriv_base + k*BLK_SZ;` buffers in a memalloc carve.
 
