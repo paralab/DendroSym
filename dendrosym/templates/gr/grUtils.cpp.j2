@@ -142,9 +142,11 @@ void twoPuncturesInit(double x, double y, double z, double *var) {
     TwoPunctures(x, y, z, var, &mp, &mm, &mp_adm, &mm_adm, &E, &J1, &J2, &J3);
 }
 
+{% endif %}
+
 // -------------------------------------------------------------------------
-// TwoPunctures mesh estimate -- analytic Brill-Lindquist + conformally-flat.
-// Aij omitted (smooth, doesn't drive AMR).
+// Position-dependent wavelet tolerance. No TwoPunctures dependency, so this
+// stays outside the tpid guard -- solver_ctx calls it unconditionally.
 // -------------------------------------------------------------------------
 double computeWTolDCoords(double x, double y, double z, double *hx) {
     const double tolMin = {{ project_upper }}_WAVELET_TOL;
@@ -193,6 +195,11 @@ double computeWTolDCoords(double x, double y, double z, double *hx) {
     }
 }
 
+{% if enable_tpid %}
+// -------------------------------------------------------------------------
+// TwoPunctures mesh estimate -- analytic Brill-Lindquist + conformally-flat.
+// Aij omitted (smooth, doesn't drive AMR).
+// -------------------------------------------------------------------------
 void twoPuncturesInitEstimate(double x, double y, double z, double *var) {
     const double xx = x - TPID::center_offset[0];
     const double yy = y - TPID::center_offset[1];
