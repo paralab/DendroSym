@@ -194,7 +194,7 @@ def _try_cache_hit(vt, vt_hash, gencode_dir, prefix):
     return hit
 
 
-def _save_cache(vt, vt_hash, gencode_dir, ctx_update):
+def _save_cache(vt, vt_hash, gencode_dir, ctx_update, config=None):
     """Snapshot the just-generated files + ctx update into the cache."""
     cache_root = gencode_dir / ".dendro_cache" / vt_hash
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -213,38 +213,106 @@ def _save_cache(vt, vt_hash, gencode_dir, ctx_update):
     if ctx_update.get(f"{vt}_cascade"):
         meta["cascade"] = ctx_update[f"{vt}_cascade"]
     (cache_root / "meta.json").write_text(json.dumps(meta))
-    _write_cache_pointer(vt, vt_hash, gencode_dir)
+    _write_cache_pointer(vt, vt_hash, gencode_dir, config)
 
 
 def _cache_pointer_path(vt, gencode_dir):
     return gencode_dir / ".dendro_cache" / f"last_{vt}.json"
 
 
-def _write_cache_pointer(vt, vt_hash, gencode_dir):
+def _config_source_sha(config):
+    """SHA of the Python file that defines `config`, or None if undeterminable.
+
+    A cheap staleness proxy for skip_gencode. The real check is the cache key,
+    but computing that means running _extract_rhs_expressions -- the expensive
+    step skip_gencode exists to avoid. Hashing the configuration source instead
+    separates the two cases that matter: editing TEMPLATES is what the flag is
+    for and must not trip the check, while editing EQUATIONS is the hazard and
+    does. It is a proxy, not a proof: a comment-only edit trips it, and equations
+    pulled in from another module do not.
+    """
+    def _holds(mod):
+        try:
+            return any(v is config for v in vars(mod).values())
+        except Exception:
+            return False
+
+    # __main__ first: running the config as a script is the normal invocation.
+    # Fall THROUGH rather than give up when it has no real file (a heredoc or
+    # notebook gives "<stdin>"), so an imported config is still resolved.
+    main = sys.modules.get("__main__")
+    candidates = [main] if main is not None and _holds(main) else []
+    for mod in list(sys.modules.values()):
+        if mod is None or mod is main:
+            continue
+        if _holds(mod):
+            candidates.append(mod)
+
+    for mod in candidates:
+        path = getattr(mod, "__file__", None)
+        if path and os.path.exists(path):
+            with open(path, "rb") as fh:
+                return hashlib.sha256(fh.read()).hexdigest()[:16]
+    return None
+
+
+def _write_cache_pointer(vt, vt_hash, gencode_dir, config=None):
     """Record which cache entry this var_type's gencode on disk came from.
 
     skip_gencode needs the ctx that produced the .cpp.inc files -- not just
     their filenames -- and cannot recompute the cache key without running
     _extract_rhs_expressions, which is the expensive step it exists to skip.
+    The schema version and configuration hash recorded alongside are what let
+    the reuse path notice that the stored ctx no longer applies.
     """
     path = _cache_pointer_path(vt, gencode_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"hash": vt_hash}))
+    path.write_text(json.dumps({
+        "hash": vt_hash,
+        "schema": _CACHE_SCHEMA_VERSION,
+        "config_sha": _config_source_sha(config) if config is not None else None,
+    }))
 
 
-def _load_cached_ctx(vt, gencode_dir, prefix):
+def _load_cached_ctx(vt, gencode_dir, prefix, config=None, allow_stale=False):
     """The ctx update for gencode already on disk, via the cache pointer.
 
-    Returns None when this output dir has no recorded gencode for `vt`.
+    Returns ``(ctx_update, note)``. ``ctx_update`` is None when the record is
+    unusable and ``note`` says why, so the caller can report every var_type's
+    reason at once instead of a bare failure.
     """
     path = _cache_pointer_path(vt, gencode_dir)
     if not path.exists():
-        return None
+        return None, "no cache record -- gencode has never been generated here"
     try:
-        vt_hash = json.loads(path.read_text())["hash"]
+        rec = json.loads(path.read_text())
+        vt_hash = rec["hash"]
     except (ValueError, KeyError):
-        return None
-    return _try_cache_hit(vt, vt_hash, gencode_dir, prefix)
+        return None, "cache pointer is unreadable"
+
+    schema = rec.get("schema")
+    if schema != _CACHE_SCHEMA_VERSION:
+        return None, (f"recorded under gencode schema {schema or '<none>'}, "
+                      f"this dendrosym emits {_CACHE_SCHEMA_VERSION}")
+
+    sha_then, sha_now = rec.get("config_sha"), _config_source_sha(config)
+    checkable = bool(sha_then and sha_now)
+    stale = checkable and sha_then != sha_now
+    if stale and not allow_stale:
+        return None, (f"the solver configuration has changed since this gencode "
+                      f"was generated ({sha_then} -> {sha_now}); the equations on "
+                      "disk may no longer be the ones in the config")
+
+    hit = _try_cache_hit(vt, vt_hash, gencode_dir, prefix)
+    if hit is None:
+        return None, f"cache entry {vt_hash} is missing one or more files"
+
+    note = f"reusing {vt_hash}"
+    if stale:
+        note += "  [STALE -- forced by DENDRO_ALLOW_STALE_GENCODE]"
+    elif not checkable:
+        note += "  (config staleness not checkable)"
+    return hit, note
 
 
 def _run_var_type(args):
@@ -528,18 +596,27 @@ class DendroProjectGenerator:
             # renders `{{ ... }} d;`). All of it is already in the cache meta.
             prefix = self.config.project_name
             gencode_dir = output / "solver" / "gencode"
-            missing = []
+            allow_stale = os.environ.get("DENDRO_ALLOW_STALE_GENCODE") == "1"
+            problems = []
             for vt in ctx["var_types"]:
-                cached = _load_cached_ctx(vt, gencode_dir, prefix)
+                cached, note = _load_cached_ctx(
+                    vt, gencode_dir, prefix, self.config, allow_stale
+                )
                 if cached is None:
-                    missing.append(vt)
+                    problems.append((vt, note))
                 else:
+                    # name what is being reused: the reuse should be visible in
+                    # the log, not inferred from the flag
+                    print(f"  [reuse] {vt} -- {note}", file=sys.stderr)
                     ctx.update(cached)
-            if missing:
+            if problems:
+                detail = "\n".join(f"  - {vt}: {why}" for vt, why in problems)
                 raise RuntimeError(
-                    "skip_gencode=True needs gencode already generated into "
-                    f"{gencode_dir}, but no cache record exists for: "
-                    f"{', '.join(missing)}. Run a full generation once first."
+                    "skip_gencode=True cannot reuse the gencode in "
+                    f"{gencode_dir}:\n{detail}\n"
+                    "Run a full generation, or set DENDRO_ALLOW_STALE_GENCODE=1 "
+                    "to reuse it anyway (only safe when you know the equations "
+                    "did not change)."
                 )
             self._finalize_gencode_ctx(ctx, ctx["var_types"])
 
@@ -884,7 +961,7 @@ class DendroProjectGenerator:
             if hit is not None:
                 print(f"  [cache hit] {vt} ({vt_hash})", file=sys.stderr)
                 ctx.update(hit)
-                _write_cache_pointer(vt, vt_hash, gencode_dir)
+                _write_cache_pointer(vt, vt_hash, gencode_dir, c)
             else:
                 miss_vts.append(vt)
 
@@ -912,7 +989,7 @@ class DendroProjectGenerator:
 
         for vt, result in zip(miss_vts, results):
             ctx.update(result)
-            _save_cache(vt, vt_hashes[vt], gencode_dir, result)
+            _save_cache(vt, vt_hashes[vt], gencode_dir, result, c)
 
         self._finalize_gencode_ctx(ctx, active_vts)
 
