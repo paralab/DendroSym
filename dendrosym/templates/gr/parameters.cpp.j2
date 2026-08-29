@@ -854,7 +854,9 @@ void dumpParamFile(std::ostream& sout, int root, MPI_Comm comm) {
          << std::endl;
     sout << "wavelet_tol_function_r1 = " << {{ project_upper }}_WAVELET_TOL_FUNCTION_R1
          << std::endl;
+{% if enable_bh_tracking %}
     sout << "amr_r_ratio = " << {{ project_upper }}_AMR_R_RATIO << std::endl;
+{% endif %}
 
     sout << "\n[dissipation]" << std::endl;
     sout << "ko_diss_sigma = " << KO_DISS_SIGMA << std::endl;

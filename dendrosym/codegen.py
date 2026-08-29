@@ -9,6 +9,7 @@ currently unused functions. They will be added soon.
 """
 
 # import enum
+import heapq
 import re as regex
 import sys
 from typing import List, Tuple, Union
@@ -222,6 +223,7 @@ def generate_cpu_preextracted(
     return_stats=False,
     input_names=None,
     input_struct=None,
+    interleave_outputs=False,
 ):
     custom_functions = {
         "grad": "grad",
@@ -245,21 +247,77 @@ def generate_cpu_preextracted(
     # output_str first, then run the regex pass once over the whole block
     # (the regex matches grad(...)/grad2(...) call sites independent of
     # surrounding context, so per-expression vs one-shot is equivalent).
-    output_str += "// Dendro: TEMPORARY VARIABLES\n"
     prefix = f"{'const ' if use_const else ''}{dtype} "
-    for v1, v2 in cse_list[0]:
-        output_str += prefix + cprinter.doprint(v2, assign_to=v1) + "\n"
-        if want_stats:
-            reduced_ops += sym.count_ops(v2)
 
-    output_str += "// Dendro: END TEMPORARY VARIABLES\n"
-    output_str += "\n// Dendro: MAIN VARIABLES"
-    for i, e in enumerate(cse_list[1]):
-        output_str += "\n//--\n" + cprinter.doprint(e, assign_to=str(rhs_var_names[i]) + idx) + "\n"
-        if want_stats:
-            reduced_ops += sym.count_ops(e)
+    if interleave_outputs:
+        # Outputs that are also INPUTS to other statements (a staged block whose
+        # quantities are defined in terms of each other) cannot use the
+        # temporaries-then-outputs layout below: cse() hoists every temporary to
+        # the front, so a temporary reading an output would be emitted above that
+        # output's declaration and the block would not compile. Emit one flat,
+        # dependency-ordered block instead. Ties keep the original index, so the
+        # output stays deterministic and, when no output feeds another statement,
+        # identical in content to the default layout.
+        stmts = []  # (defined symbol or None, text, referenced symbols)
+        for v1, v2 in cse_list[0]:
+            stmts.append((v1, prefix + cprinter.doprint(v2, assign_to=v1) + "\n",
+                          v2.free_symbols))
+            if want_stats:
+                reduced_ops += sym.count_ops(v2)
+        for i, e in enumerate(cse_list[1]):
+            name = str(rhs_var_names[i])
+            # names arrive already carrying their declaration ("double DDth00")
+            bare = name.split()[-1]
+            stmts.append((sym.Symbol(bare),
+                          "\n//--\n" + cprinter.doprint(e, assign_to=name + idx) + "\n",
+                          e.free_symbols))
+            if want_stats:
+                reduced_ops += sym.count_ops(e)
 
-    output_str += "// Dendro: END MAIN VARIABLES\n\n"
+        defined = {}
+        for k, (dsym, _t, _r) in enumerate(stmts):
+            if dsym is not None:
+                defined.setdefault(dsym, k)
+        children = [[] for _ in stmts]
+        indeg = [0] * len(stmts)
+        for k, (_d, _t, refs) in enumerate(stmts):
+            deps = {defined[r] for r in refs if r in defined and defined[r] != k}
+            indeg[k] = len(deps)
+            for j in deps:
+                children[j].append(k)
+
+        ready = [k for k in range(len(stmts)) if indeg[k] == 0]
+        heapq.heapify(ready)
+        n_emitted = 0
+        while ready:
+            k = heapq.heappop(ready)
+            output_str += stmts[k][1]
+            n_emitted += 1
+            for c in children[k]:
+                indeg[c] -= 1
+                if indeg[c] == 0:
+                    heapq.heappush(ready, c)
+        if n_emitted != len(stmts):
+            stuck = [str(stmts[k][0]) for k in range(len(stmts)) if indeg[k] > 0]
+            raise ValueError(
+                "cyclic dependency among the emitted statements; "
+                f"{len(stmts) - n_emitted} unresolved, e.g. {stuck[:8]}"
+            )
+    else:
+        output_str += "// Dendro: TEMPORARY VARIABLES\n"
+        for v1, v2 in cse_list[0]:
+            output_str += prefix + cprinter.doprint(v2, assign_to=v1) + "\n"
+            if want_stats:
+                reduced_ops += sym.count_ops(v2)
+
+        output_str += "// Dendro: END TEMPORARY VARIABLES\n"
+        output_str += "\n// Dendro: MAIN VARIABLES"
+        for i, e in enumerate(cse_list[1]):
+            output_str += "\n//--\n" + cprinter.doprint(e, assign_to=str(rhs_var_names[i]) + idx) + "\n"
+            if want_stats:
+                reduced_ops += sym.count_ops(e)
+
+        output_str += "// Dendro: END MAIN VARIABLES\n\n"
     output_str = change_deriv_names(output_str)
     if input_struct and input_names:
         output_str = apply_input_struct(output_str, input_names, input_struct)

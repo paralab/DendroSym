@@ -103,7 +103,10 @@ def _emit_deriv_calc(calc: str, use_grad_set: bool, label: str) -> str:
 
 # bump when the gencode pipeline changes in a way that invalidates old caches
 # (e.g. changing the printer, CSE settings, .cpp.inc layout, or bcs/ko emission)
-_CACHE_SCHEMA_VERSION = "v18"
+# v19: staged blocks emit in dependency order (interleave_outputs) -- a staged
+# block whose quantities reference each other previously emitted CSE temporaries
+# above the outputs they read. Only affects solvers with a staged function.
+_CACHE_SCHEMA_VERSION = "v19"
 
 
 def _vt_worker_init(inner_workers):

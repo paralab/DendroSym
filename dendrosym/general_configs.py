@@ -322,6 +322,13 @@ class DendroConfiguration:
             # declare each staged output as a local double; group input-field
             # reads under `in.` (same as the main RHS). NO index string -- the
             # staged vars are per-point locals, not [pp]-arrays.
+            # interleave_outputs: a layer-blocked staged block defines its
+            # quantities in terms of EACH OTHER (Ricci -> Riemann projections ->
+            # Cotton), so cse() produces temporaries that read staged outputs.
+            # The default temporaries-then-outputs layout would emit those
+            # temporaries above the declarations they read. Emit in dependency
+            # order instead. For a staged block whose outputs are independent
+            # this is a no-op on the emitted content.
             output_str = dendrosym.codegen.generate_cpu_preextracted(
                 cse_exp,
                 ["double " + str(n) for n in staged_exprs_names],
@@ -329,6 +336,7 @@ class DendroConfiguration:
                 0,
                 input_names=self.input_var_names(),
                 input_struct=self.input_struct_name(),
+                interleave_outputs=True,
             )
         else:
             output_str = ""
