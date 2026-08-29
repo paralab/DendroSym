@@ -687,7 +687,11 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
                 BH2.getBHCoordX(), BH2.getBHCoordY(), BH2.getBHCoordZ(),
                 BH2.getBHMass()),
         };
-        bool is_bbh = true;
+        // enable_bh_tracking only says there IS black-hole data; it does not say
+        // there are two. A single puncture parks an inert mass-0 BH2 far away
+        // (the phantom guard), and with is_bbh true the finder forces horizon 1
+        // onto that phantom with M_scale = 0 and fails with error code 14.
+        bool is_bbh = (BH2.getBHMass() > 0.0);
 {% else %}
         std::vector<dendro_aeh::SimpleBlackHoleData> simpleBHData;
         bool is_bbh = false;
