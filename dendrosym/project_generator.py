@@ -213,6 +213,38 @@ def _save_cache(vt, vt_hash, gencode_dir, ctx_update):
     if ctx_update.get(f"{vt}_cascade"):
         meta["cascade"] = ctx_update[f"{vt}_cascade"]
     (cache_root / "meta.json").write_text(json.dumps(meta))
+    _write_cache_pointer(vt, vt_hash, gencode_dir)
+
+
+def _cache_pointer_path(vt, gencode_dir):
+    return gencode_dir / ".dendro_cache" / f"last_{vt}.json"
+
+
+def _write_cache_pointer(vt, vt_hash, gencode_dir):
+    """Record which cache entry this var_type's gencode on disk came from.
+
+    skip_gencode needs the ctx that produced the .cpp.inc files -- not just
+    their filenames -- and cannot recompute the cache key without running
+    _extract_rhs_expressions, which is the expensive step it exists to skip.
+    """
+    path = _cache_pointer_path(vt, gencode_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"hash": vt_hash}))
+
+
+def _load_cached_ctx(vt, gencode_dir, prefix):
+    """The ctx update for gencode already on disk, via the cache pointer.
+
+    Returns None when this output dir has no recorded gencode for `vt`.
+    """
+    path = _cache_pointer_path(vt, gencode_dir)
+    if not path.exists():
+        return None
+    try:
+        vt_hash = json.loads(path.read_text())["hash"]
+    except (ValueError, KeyError):
+        return None
+    return _try_cache_hit(vt, vt_hash, gencode_dir, prefix)
 
 
 def _run_var_type(args):
@@ -488,24 +520,28 @@ class DendroProjectGenerator:
             self._generate_gencode(output / "solver" / "gencode", ctx)
         else:
             print("Skipping gencode (skip_gencode=True)", file=sys.stderr)
-            # still set the expected gencode filenames so templates can include them
+            # Reuse the ctx that PRODUCED the gencode on disk, not just its
+            # filenames. bcs_code/ko_code are inlined into the templates behind
+            # `{% if ... is defined and ... %}`, so leaving them out does not
+            # fail the build -- it silently drops the boundary conditions and KO
+            # dissipation. deriv_struct_name is equally required (rhs.cpp.j2
+            # renders `{{ ... }} d;`). All of it is already in the cache meta.
             prefix = self.config.project_name
+            gencode_dir = output / "solver" / "gencode"
+            missing = []
             for vt in ctx["var_types"]:
-                ctx[f"{vt}_gencode"] = {
-                    "deriv_alloc": f"{prefix}_{vt}_deriv_memalloc.cpp.inc",
-                    "deriv_calc": f"{prefix}_{vt}_deriv_calc.cpp.inc",
-                    "deriv_dealloc": f"{prefix}_{vt}_deriv_memdealloc.cpp.inc",
-                    "intermediate_grad": f"{prefix}_{vt}_intermediate_grad.cpp.inc",
-                    "intermediate_grad_dealloc": f"{prefix}_{vt}_intermediate_grad_dealloc.cpp.inc",
-                    "rhs_eqns": f"{prefix}_{vt}_rhs_eqns.cpp.inc",
-                    "ko_deriv_calc": f"{prefix}_{vt}_ko_deriv_calc.cpp.inc",
-                }
-                spec = (self.config.cascade_spec(vt)
-                        if hasattr(self.config, "cascade_spec") else None)
-                if spec is not None:
-                    from dendrosym.cascade import dendro_bridge as _cb
-                    ctx[f"{vt}_cascade"] = _cb.cascade_ctx(
-                        _cb.cascade_filenames(prefix, vt), spec[1])
+                cached = _load_cached_ctx(vt, gencode_dir, prefix)
+                if cached is None:
+                    missing.append(vt)
+                else:
+                    ctx.update(cached)
+            if missing:
+                raise RuntimeError(
+                    "skip_gencode=True needs gencode already generated into "
+                    f"{gencode_dir}, but no cache record exists for: "
+                    f"{', '.join(missing)}. Run a full generation once first."
+                )
+            self._finalize_gencode_ctx(ctx, ctx["var_types"])
 
         if not gencode_only:
             # 3. Render templates -> src/ and include/
@@ -848,6 +884,7 @@ class DendroProjectGenerator:
             if hit is not None:
                 print(f"  [cache hit] {vt} ({vt_hash})", file=sys.stderr)
                 ctx.update(hit)
+                _write_cache_pointer(vt, vt_hash, gencode_dir)
             else:
                 miss_vts.append(vt)
 
@@ -877,10 +914,23 @@ class DendroProjectGenerator:
             ctx.update(result)
             _save_cache(vt, vt_hashes[vt], gencode_dir, result)
 
+        self._finalize_gencode_ctx(ctx, active_vts)
+
+    def _finalize_gencode_ctx(self, ctx: dict, var_types):
+        """Context derived from the gencode results, but not from producing them.
+
+        Must run on the skip_gencode path too. NUM_DERIVATIVES sizes the
+        derivative workspace, so falling back to the template default
+        UNDER-sizes the buffer rather than failing; and a missing
+        evolution_constraint_enforcement block is silently dropped by the
+        template rather than erroring.
+        """
+        c = self.config
+
         # size NUM_DERIVATIVES from the largest per-var_type workspace (replaces
         # the hand-set magic number); 0 (no buffers) leaves the template default.
         deriv_counts = [
-            ctx.get(f"{vt}_num_derivs", 0) for vt in active_vts
+            ctx.get(f"{vt}_num_derivs", 0) for vt in var_types
         ]
         max_derivs = max(deriv_counts, default=0)
         if max_derivs > 0:
