@@ -106,7 +106,11 @@ def _emit_deriv_calc(calc: str, use_grad_set: bool, label: str) -> str:
 # v19: staged blocks emit in dependency order (interleave_outputs) -- a staged
 # block whose quantities reference each other previously emitted CSE temporaries
 # above the outputs they read. Only affects solvers with a staged function.
-_CACHE_SCHEMA_VERSION = "v19"
+# v20: the expression digest is a streaming structural walk instead of
+# sym.srepr(). Same discriminating power, but srepr was 75% of a CCZ4 cache-hit
+# run and ~11 min/var_type on EDCS, purely to build strings it then threw away.
+# Emission is byte-identical; only the key values move.
+_CACHE_SCHEMA_VERSION = "v20"
 
 
 def _vt_worker_init(inner_workers):
@@ -114,22 +118,75 @@ def _vt_worker_init(inner_workers):
     os.environ["DENDRO_WORKERS"] = str(inner_workers)
 
 
-def _vt_cache_key(config, vt):
-    """Stable hash of all inputs that affect this var_type's gencode output.
+_DIGEST_CLOSE = object()
 
-    Side effect: populates config.stored_rhs_function[vt] (same work
-    _extract_rhs_expressions would do anyway, so the cost is amortized when
-    we miss the cache).
+
+def _feed_expr_digest(h, expr):
+    """Stream a structural digest of `expr` into hasher `h`.
+
+    Same discriminating power as hashing ``sym.srepr(expr)`` -- identical class
+    names, argument order and atom reprs -- without ever materializing the
+    string. That matters: srepr over a large staged block builds hundreds of MB
+    only to be hashed and discarded, and it dominated generation wall-clock.
+    Iterative rather than recursive so a deep tree cannot hit the recursion
+    limit.
     """
     import sympy as sym
+
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if node is _DIGEST_CLOSE:
+            h.update(b")")
+            continue
+        args = getattr(node, "args", None)
+        if not args:
+            # atoms (and any stray non-Basic) carry their full repr: this is
+            # where numeric values, symbol names and Float precision enter.
+            h.update(sym.srepr(node).encode() if hasattr(node, "args")
+                     else repr(node).encode())
+            h.update(b"\x1f")
+            continue
+        h.update(type(node).__name__.encode())
+        h.update(b"(")
+        stack.append(_DIGEST_CLOSE)
+        stack.extend(reversed(args))
+
+
+def _vt_expr_hash(config, vt):
+    """Digest of only the SYMBOLIC inputs to this var_type's gencode.
+
+    Split out from the full key because this half is the expensive one (it runs
+    _extract_rhs_expressions and walks every expression) while everything else
+    in the key is a handful of flags. Separating them lets a run that can prove
+    the equations have not moved reuse this digest instead of recomputing it --
+    see _recorded_expr_hash.
+    """
     all_exp, all_rhs_names, staged_exp, staged_names, _ = (
         config._extract_rhs_expressions(vt)
     )
-    parts = [_CACHE_SCHEMA_VERSION]
-    parts.extend(sym.srepr(e) for e in all_exp)
-    parts.extend(sym.srepr(e) for e in staged_exp)
-    parts.append(repr(all_rhs_names))
-    parts.append(repr(staged_names))
+    h = hashlib.sha256()
+    for e in all_exp:
+        _feed_expr_digest(h, e)
+        h.update(b"\x1e")
+    h.update(b"|staged|")
+    for e in staged_exp:
+        _feed_expr_digest(h, e)
+        h.update(b"\x1e")
+    h.update(repr(all_rhs_names).encode())
+    h.update(repr(staged_names).encode())
+    return h.hexdigest()[:16]
+
+
+def _vt_cache_key(config, vt, expr_hash=None):
+    """Stable hash of all inputs that affect this var_type's gencode output.
+
+    `expr_hash` short-circuits the expensive symbolic half; pass one only when
+    the equations are known not to have changed.
+    """
+    if expr_hash is None:
+        expr_hash = _vt_expr_hash(config, vt)
+    parts = [_CACHE_SCHEMA_VERSION, expr_hash]
     parts.append(config.idx_str)
     parts.append(getattr(config, "deriv_obj", "") or "")
     parts.append(str(getattr(config, "use_advective_derivs", False)))
@@ -194,7 +251,7 @@ def _try_cache_hit(vt, vt_hash, gencode_dir, prefix):
     return hit
 
 
-def _save_cache(vt, vt_hash, gencode_dir, ctx_update, config=None):
+def _save_cache(vt, vt_hash, gencode_dir, ctx_update, config=None, expr_hash=None):
     """Snapshot the just-generated files + ctx update into the cache."""
     cache_root = gencode_dir / ".dendro_cache" / vt_hash
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -213,7 +270,7 @@ def _save_cache(vt, vt_hash, gencode_dir, ctx_update, config=None):
     if ctx_update.get(f"{vt}_cascade"):
         meta["cascade"] = ctx_update[f"{vt}_cascade"]
     (cache_root / "meta.json").write_text(json.dumps(meta))
-    _write_cache_pointer(vt, vt_hash, gencode_dir, config)
+    _write_cache_pointer(vt, vt_hash, gencode_dir, config, expr_hash=expr_hash)
 
 
 def _cache_pointer_path(vt, gencode_dir):
@@ -251,12 +308,45 @@ def _config_source_sha(config):
     for mod in candidates:
         path = getattr(mod, "__file__", None)
         if path and os.path.exists(path):
-            with open(path, "rb") as fh:
-                return hashlib.sha256(fh.read()).hexdigest()[:16]
+            return _project_tree_sha(os.path.abspath(path))
     return None
 
 
-def _write_cache_pointer(vt, vt_hash, gencode_dir, config=None):
+def _project_tree_sha(config_path):
+    """SHA over the config file AND every project-local module loaded with it.
+
+    A single-file hash was the original proxy, and it misses exactly the layout
+    where equations are split across modules next to the config (EDCS): editing
+    the module holding the algebra would not trip it. Hashing every loaded
+    module under the config's own directory closes that hole, which is what lets
+    the cache-key fast path treat "source unchanged" as "equations unchanged".
+    Library code (dendrosym, site-packages) is deliberately excluded -- emission
+    changes are covered by _CACHE_SCHEMA_VERSION, not by this.
+    """
+    base = os.path.dirname(config_path)
+    paths = {config_path}
+    for mod in list(sys.modules.values()):
+        f = getattr(mod, "__file__", None)
+        if not f:
+            continue
+        f = os.path.abspath(f)
+        if f.startswith(base + os.sep) and os.path.exists(f):
+            paths.add(f)
+
+    h = hashlib.sha256()
+    for f in sorted(paths):
+        h.update(os.path.relpath(f, base).encode())
+        h.update(b"\0")
+        try:
+            with open(f, "rb") as fh:
+                h.update(fh.read())
+        except OSError:
+            return None
+        h.update(b"\0")
+    return h.hexdigest()[:16]
+
+
+def _write_cache_pointer(vt, vt_hash, gencode_dir, config=None, expr_hash=None):
     """Record which cache entry this var_type's gencode on disk came from.
 
     skip_gencode needs the ctx that produced the .cpp.inc files -- not just
@@ -269,9 +359,44 @@ def _write_cache_pointer(vt, vt_hash, gencode_dir, config=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
         "hash": vt_hash,
+        "expr_hash": expr_hash,
         "schema": _CACHE_SCHEMA_VERSION,
         "config_sha": _config_source_sha(config) if config is not None else None,
     }))
+
+
+def _recorded_expr_hash(vt, gencode_dir, config):
+    """The stored expression digest, when the config source provably has not moved.
+
+    Recomputing it costs a full _extract_rhs_expressions plus a walk of every
+    expression, and that is paid on EVERY run -- cache hit or miss -- because
+    the key is what decides hit-or-miss. On a large staged block that is minutes
+    of work to re-derive a number already written down.
+
+    Reuse is sound only if the source hash covers everything that determines the
+    expressions, which is why _project_tree_sha hashes the whole project-local
+    module set rather than one file. The cheap half of the key (flags, cascade
+    options, deriv object) is always recomputed, so a flag flip still keys
+    distinctly. Set DENDRO_STRICT_CACHE_KEY=1 to always recompute -- the escape
+    hatch for a config whose equations depend on something outside its own
+    source tree.
+    """
+    if os.environ.get("DENDRO_STRICT_CACHE_KEY") == "1":
+        return None
+    rec_path = _cache_pointer_path(vt, gencode_dir)
+    if not rec_path.exists():
+        return None
+    try:
+        rec = json.loads(rec_path.read_text())
+    except ValueError:
+        return None
+    if rec.get("schema") != _CACHE_SCHEMA_VERSION:
+        return None
+    expr_hash = rec.get("expr_hash")
+    sha_then, sha_now = rec.get("config_sha"), _config_source_sha(config)
+    if not (expr_hash and sha_then and sha_now and sha_then == sha_now):
+        return None
+    return expr_hash
 
 
 def _load_cached_ctx(vt, gencode_dir, prefix, config=None, allow_stale=False):
@@ -538,6 +663,44 @@ def _run_var_type(args):
 # ---------------------------------------------------------------------------
 # Main generator
 # ---------------------------------------------------------------------------
+
+
+def build_template_map(ctx):
+    """Output path -> template path, for one template context.
+
+    Module level and shared with the template gate on purpose: a gate that keeps
+    its own list of templates drifts from the real one, and drift is the exact
+    bug class the gate exists to catch.
+    """
+    template_map = {
+        # GR solver templates
+        "solver/include/grDef.h": "gr/grDef.h.j2",
+        **({"solver/include/bh.h": "gr/bh.h.j2"} if ctx.get("enable_bh_tracking") else {}),
+        "solver/include/rhs.h": "gr/rhs.h.j2",
+        "solver/include/physcon.h": "gr/physcon.h.j2",
+        "solver/include/parameters.h": "gr/parameters.h.j2",
+        f"solver/include/{ctx['project_name']}_constraints.h": "gr/constraints.h.j2",
+        f"solver/include/{ctx['project_name']}Ctx.h": "gr/solver_ctx.h.j2",
+        "solver/include/grUtils.h": "gr/grUtils.h.j2",
+        "solver/include/profile_params.h": "gr/profile_params.h.j2",
+        "solver/src/rhs.cpp": "gr/rhs.cpp.j2",
+        "solver/src/profile_params.cpp": "gr/profile_params.cpp.j2",
+        "solver/src/physcon.cpp": "gr/physcon.cpp.j2",
+        "solver/src/parameters.cpp": "gr/parameters.cpp.j2",
+        f"solver/src/{ctx['project_name']}Ctx.cpp": "gr/solver_ctx.cpp.j2",
+        "solver/src/grUtils.cpp": "gr/grUtils.cpp.j2",
+        f"solver/{ctx['project_name']}_main.cpp": "gr/main.cpp.j2",
+        # sample parameter file (at project root for easy access)
+        f"{ctx['project_name']}_parameters.sample.toml": "gr/sample_params.toml.j2",
+        # newcomer orientation: pipeline, quickstart, where-things-live
+        "README.md": "gr/readme.md.j2",
+        # physicist's map of the hand-editable hooks
+        "CUSTOMIZE.md": "gr/customize.md.j2",
+        # Common templates
+        "CMakeLists.txt": "common/CMakeLists.txt.j2",
+        "solver/CMakeLists.txt": "common/solver_CMakeLists.txt.j2",
+    }
+    return template_map
 
 
 class DendroProjectGenerator:
@@ -952,8 +1115,18 @@ class DendroProjectGenerator:
         force_recache = os.environ.get("DENDRO_NO_GENCODE_CACHE") == "1"
         vt_hashes = {}
         miss_vts = []
+        expr_hashes = {}
         for vt in active_vts:
-            vt_hash = _vt_cache_key(c, vt)
+            # the symbolic half of the key is the expensive half; reuse the
+            # recorded digest when the config source provably has not moved.
+            expr_hash = _recorded_expr_hash(vt, gencode_dir, c)
+            if expr_hash is not None:
+                print(f"  [cache key] {vt} reusing recorded equation digest "
+                      f"({expr_hash}); config source unchanged", file=sys.stderr)
+            else:
+                expr_hash = _vt_expr_hash(c, vt)
+            expr_hashes[vt] = expr_hash
+            vt_hash = _vt_cache_key(c, vt, expr_hash=expr_hash)
             vt_hashes[vt] = vt_hash
             hit = None if force_recache else _try_cache_hit(
                 vt, vt_hash, gencode_dir, prefix
@@ -961,7 +1134,8 @@ class DendroProjectGenerator:
             if hit is not None:
                 print(f"  [cache hit] {vt} ({vt_hash})", file=sys.stderr)
                 ctx.update(hit)
-                _write_cache_pointer(vt, vt_hash, gencode_dir, c)
+                _write_cache_pointer(vt, vt_hash, gencode_dir, c,
+                                     expr_hash=expr_hash)
             else:
                 miss_vts.append(vt)
 
@@ -989,7 +1163,8 @@ class DendroProjectGenerator:
 
         for vt, result in zip(miss_vts, results):
             ctx.update(result)
-            _save_cache(vt, vt_hashes[vt], gencode_dir, result, c)
+            _save_cache(vt, vt_hashes[vt], gencode_dir, result, c,
+                        expr_hash=expr_hashes[vt])
 
         self._finalize_gencode_ctx(ctx, active_vts)
 
@@ -1030,35 +1205,7 @@ class DendroProjectGenerator:
     def _render_templates(self, output: Path, ctx: dict):
         """Render all Jinja2 templates into the output directory."""
 
-        # Map of output path -> template path (relative to templates/)
-        template_map = {
-            # GR solver templates
-            "solver/include/grDef.h": "gr/grDef.h.j2",
-            **({"solver/include/bh.h": "gr/bh.h.j2"} if ctx.get("enable_bh_tracking") else {}),
-            "solver/include/rhs.h": "gr/rhs.h.j2",
-            "solver/include/physcon.h": "gr/physcon.h.j2",
-            "solver/include/parameters.h": "gr/parameters.h.j2",
-            f"solver/include/{ctx['project_name']}_constraints.h": "gr/constraints.h.j2",
-            f"solver/include/{ctx['project_name']}Ctx.h": "gr/solver_ctx.h.j2",
-            "solver/include/grUtils.h": "gr/grUtils.h.j2",
-            "solver/include/profile_params.h": "gr/profile_params.h.j2",
-            "solver/src/rhs.cpp": "gr/rhs.cpp.j2",
-            "solver/src/profile_params.cpp": "gr/profile_params.cpp.j2",
-            "solver/src/physcon.cpp": "gr/physcon.cpp.j2",
-            "solver/src/parameters.cpp": "gr/parameters.cpp.j2",
-            f"solver/src/{ctx['project_name']}Ctx.cpp": "gr/solver_ctx.cpp.j2",
-            "solver/src/grUtils.cpp": "gr/grUtils.cpp.j2",
-            f"solver/{ctx['project_name']}_main.cpp": "gr/main.cpp.j2",
-            # sample parameter file (at project root for easy access)
-            f"{ctx['project_name']}_parameters.sample.toml": "gr/sample_params.toml.j2",
-            # newcomer orientation: pipeline, quickstart, where-things-live
-            "README.md": "gr/readme.md.j2",
-            # physicist's map of the hand-editable hooks
-            "CUSTOMIZE.md": "gr/customize.md.j2",
-            # Common templates
-            "CMakeLists.txt": "common/CMakeLists.txt.j2",
-            "solver/CMakeLists.txt": "common/solver_CMakeLists.txt.j2",
-        }
+        template_map = build_template_map(ctx)
 
         for out_rel, tmpl_name in template_map.items():
             tmpl_path = _TEMPLATES_DIR / tmpl_name

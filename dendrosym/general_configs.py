@@ -850,10 +850,25 @@ class DendroConfiguration:
         It does this to match up expressions with their corresponding RHS
         variables and put the list in order. This is because the class
         manages the creation of RHS and grad variables.
+
+        Memoized per (var_type, append_rhs_to_var): building the expressions
+        means running the config's RHS function, which is the single most
+        expensive step for a large staged block, and a generation calls this
+        more than once per var_type (cache key, then find_derivatives). The
+        containers are copied out so a caller mutating its list cannot corrupt
+        the memo. Set DENDRO_NO_EXTRACT_MEMO=1 to disable.
         """
 
         if var_type == "parameter":
             raise ValueError("Cannot extract expressions from parameters")
+
+        memo_key = (var_type, append_rhs_to_var)
+        memo = getattr(self, "_extract_memo", None)
+        if memo is None:
+            memo = self._extract_memo = {}
+        if memo_key in memo:
+            a, b, c, d, e = memo[memo_key]
+            return list(a), list(b), list(c), list(d), e
 
         rhs_func = self.all_rhs_functions.get(var_type, None)
 
@@ -936,13 +951,16 @@ class DendroConfiguration:
             # otherwise we're good to continue
 
         # okay, now that we have them we can return them
-        return (
+        result = (
             all_expressions,
             all_rhs_var_names,
             staged_exprs,
             staged_vars,
             original_number_expressions,
         )
+        if os.environ.get("DENDRO_NO_EXTRACT_MEMO") != "1":
+            memo[memo_key] = result
+        return result
 
     def gen_grad_memory_alloc(
         self,
