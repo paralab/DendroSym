@@ -25,6 +25,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 
 import dendrosym
+from dendrosym.general_configs import SOLVER_FEATURES
 
 
 # ---------------------------------------------------------------------------
@@ -1023,6 +1024,7 @@ class DendroProjectGenerator:
         )
         ctx["ah_transform_body"] = getattr(c, "ah_transform_body", None)
 
+
         # derivative system: if set, emit DendroDerivatives method calls
         ctx["deriv_obj"] = getattr(c, "deriv_obj", "")
         ctx["use_dendro_derivs"] = ctx["deriv_obj"] != ""
@@ -1132,6 +1134,15 @@ class DendroProjectGenerator:
             ctx["enable_analytical"] = True
         else:
             ctx["symbolic_analytical_code"] = ""
+
+        # The feature table for CUSTOMIZE.md. Read from the RESOLVED ctx, not
+        # from the config: enable_analytical is switched on above when the
+        # config supplies analytical expressions, so a table built from the
+        # config's own attributes would tell the reader it is off.
+        ctx["solver_features"] = [
+            (flag, bool(ctx.get(flag, default)), doc)
+            for flag, (default, doc) in sorted(SOLVER_FEATURES.items())
+        ]
 
         return ctx
 

@@ -58,6 +58,57 @@ def _transform_worker(args):
     )
 
 
+# ---------------------------------------------------------------------------
+# Solver feature flags
+# ---------------------------------------------------------------------------
+# A config turns capabilities on by plain attribute assignment --
+# `cfg.enable_tpid = True`. That is convenient and, until this table existed,
+# completely unchecked: `cfg.enable_gw_extractoin = True` created a new
+# attribute, the generator's getattr fell back to the default, and the solver
+# came out silently missing the capability the author thought they had asked
+# for. Every documented silent bug in this project has been config-level, so
+# this is exactly the class worth refusing rather than absorbing.
+#
+# __setattr__ below rejects any `enable_*` name that is not a key here. Adding a
+# capability means adding it to this table -- which is also where the generated
+# CUSTOMIZE.md gets its list, so a new flag documents itself.
+SOLVER_FEATURES = {
+    "enable_analytical": (
+        False,
+        "Emit compute_analytical() and the analytic-vs-numeric difference "
+        "output. Set automatically when the config supplies analytical "
+        "expressions.",
+    ),
+    "enable_ah": (
+        False,
+        "Apparent-horizon finder (BHaHAHA, from dendrolib). Requires the "
+        "formulation to expose chi / trace(K) / At[6] / gt[6], or an explicit "
+        "ah_input_vars + ah_transform_body.",
+    ),
+    "enable_bh_tracking": (
+        False,
+        "Moving-puncture tracking: BH1/BH2 parameters, BH_LOC, the location "
+        "history, merger detection, and the BH_LOC refinement modes.",
+    ),
+    "enable_gw_extraction": (
+        False,
+        "Far-field Psi4 extraction and its spin-weighted mode decomposition. "
+        "Needs PSI4_REAL / PSI4_IMAG among the constraint variables.",
+    ),
+    "enable_profiling": (
+        False,
+        "Print an MPI-reduced timer table (rhs body / derivatives / KO / BCs / "
+        "zip / unzip) at the end of a run. CLI: --profile.",
+    ),
+    "enable_tpid": (
+        False,
+        "TwoPunctures spectral initial data (id_type 0), the standalone tpid "
+        "binary, and the TwoPunctures sources from dendrolib. Pair it with "
+        "tpid_writer, naming the project's PunctureVarsWriter.",
+    ),
+}
+
+
 class DendroConfiguration:
     """Store and use configurations for Dendro projects.
 
@@ -99,11 +150,9 @@ class DendroConfiguration:
         # by default we want to replace and or expand the derivatives
         self.replace_and_expand_derivatives = True
 
-        # profiling: when True the generated main prints an MPI-reduced timer
-        # table (rhs body / derivatives / KO / BCs / zip / unzip) at the end of the
-        # run. The timers themselves are always compiled in (negligible cost);
-        # this only adds the report. CLI: `python <cfg>.py --profile`.
-        self.enable_profiling = False
+        # feature flags -- see SOLVER_FEATURES above for what each one does.
+        for _flag, (_default, _doc) in SOLVER_FEATURES.items():
+            setattr(self, _flag, _default)
 
         # by default we also want to pull the derivatives from the derivative workspace
         self.use_deriv_workspace = True
@@ -117,6 +166,28 @@ class DendroConfiguration:
         # back to per-operator `grad_*_batch`. CLI: `--grad-set/--no-grad-set`.
         self.use_grad_set = True
 
+
+    def __setattr__(self, name, value):
+        """Refuse an `enable_*` flag this generator does not know about.
+
+        A misspelled flag is otherwise invisible: it lands as a new attribute,
+        the generator never reads it, and the solver is generated without the
+        capability. Failing here costs one traceback; not failing here costs a
+        run.
+        """
+        if name.startswith("enable_") and name not in SOLVER_FEATURES:
+            known = ", ".join(sorted(SOLVER_FEATURES))
+            raise AttributeError(
+                f"{type(self).__name__} has no feature flag '{name}'. "
+                f"Known flags: {known}. If this is a genuinely new capability, "
+                "add it to dendrosym.general_configs.SOLVER_FEATURES."
+            )
+        object.__setattr__(self, name, value)
+
+    def describe_features(self):
+        """(flag, enabled, one-line description) for every known feature."""
+        return [(f, bool(getattr(self, f, d)), doc)
+                for f, (d, doc) in sorted(SOLVER_FEATURES.items())]
 
     def set_idx_str(self, idx_str):
         """Store the string used for indexing into the variables
