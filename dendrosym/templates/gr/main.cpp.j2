@@ -15,6 +15,7 @@
 #include "TreeNode.h"
 #include "dendro.h"
 #include "ets.h"
+#include "ets_msrk.h"
 #include "mesh.h"
 #include "meshUtils.h"
 #include "mpi.h"
@@ -216,21 +217,45 @@ int main(int argc, char **argv) {
         {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE, ctx->get_mesh(),
         {{ namespace }}::{{ project_upper }}_NUM_DERIVATIVES);
 
-    ts::ETS<DendroScalar, {{ namespace }}::{{ project_upper }}Ctx> *ets =
-        new ts::ETS<DendroScalar, {{ namespace }}::{{ project_upper }}Ctx>(ctx);
+    // ETS_MSRK sets its own coefficients in the constructor; plain ETS takes
+    // them from set_ets_coefficients. Both present the same Ctx interface.
+    ts::ETS<DendroScalar, {{ namespace }}::{{ project_upper }}Ctx> *ets = nullptr;
 
-    ets->set_evolve_vars(ctx->get_evolution_vars());
-
-    // configure RK method
     switch ({{ namespace }}::{{ project_upper }}_RK_TYPE) {
-        case 0: ets->set_ets_coefficients(ts::ETSType::RK3); break;
-        case 1: ets->set_ets_coefficients(ts::ETSType::RK4); break;
-        case 2: ets->set_ets_coefficients(ts::ETSType::RK45_CASH_KARP); break;
-        default:
-            if (rank == 0) std::cerr << "Unknown RK type, defaulting to RK4" << std::endl;
-            ets->set_ets_coefficients(ts::ETSType::RK4);
+        case RKType::RK4_MSRK2_1:
+            ets = new ts::ETS_MSRK<DendroScalar, {{ namespace }}::{{ project_upper }}Ctx>(
+                ctx, ts::ETSType::RK4_MSRK2_1);
+            break;
+        case RKType::RK4_MSRK2_2:
+            ets = new ts::ETS_MSRK<DendroScalar, {{ namespace }}::{{ project_upper }}Ctx>(
+                ctx, ts::ETSType::RK4_MSRK2_2);
+            break;
+        case RKType::RK4_MSRK3:
+            ets = new ts::ETS_MSRK<DendroScalar, {{ namespace }}::{{ project_upper }}Ctx>(
+                ctx, ts::ETSType::RK4_MSRK3);
+            break;
+        default: {
+            ets = new ts::ETS<DendroScalar, {{ namespace }}::{{ project_upper }}Ctx>(ctx);
+            switch ({{ namespace }}::{{ project_upper }}_RK_TYPE) {
+                case RKType::RK3:
+                    ets->set_ets_coefficients(ts::ETSType::RK3); break;
+                case RKType::RK4:
+                    ets->set_ets_coefficients(ts::ETSType::RK4); break;
+                case RKType::RK45:
+                    ets->set_ets_coefficients(ts::ETSType::RK45_CASH_KARP); break;
+                case RKType::RK5:
+                    ets->set_ets_coefficients(ts::ETSType::RK5); break;
+                default:
+                    if (rank == 0)
+                        std::cerr << "Unknown rk_type "
+                                  << {{ namespace }}::{{ project_upper }}_RK_TYPE
+                                  << ", defaulting to RK4" << std::endl;
+                    ets->set_ets_coefficients(ts::ETSType::RK4);
+            }
+        }
     }
 
+    ets->set_evolve_vars(ctx->get_evolution_vars());
     ets->init();
 
     // initial dt from CFL on the finest level (else a no-remesh grid keeps the

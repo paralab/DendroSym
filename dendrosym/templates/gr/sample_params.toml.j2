@@ -33,7 +33,9 @@ blk_max_y =  50.0
 blk_max_z =  50.0
 
 # Time stepping
-rk_type = 1                    # 0=RK3, 1=RK4, 2=RK45
+rk_type = 1                    # 0=RK3, 1=RK4, 2=RK45, 6=RK5
+                               # 3/4/5 = multirate MSRK2_1/MSRK2_2/MSRK3,
+                               # which reuse prior RHS evaluations
 rk_time_begin = 0
 rk_time_end = 800
 rk45_time_step_size = 0.01

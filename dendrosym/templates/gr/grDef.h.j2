@@ -37,7 +37,18 @@
 #define Z_TO_GRIDZ(zc) \
     (((RgZ / Rz) * (zc - {{ namespace }}::{{ project_upper }}_COMPD_MIN[2])) + {{ namespace }}::{{ project_upper }}_OCTREE_MIN[2])
 
-enum RKType { RK3 = 0, RK4, RK45 };
+// Time-integrator selection, read from the TOML as `rk_type`. Values 0-2 are
+// fixed by existing par files; the multirate variants were appended.
+// MSRK reuses RHS evaluations from previous steps (arXiv:2603.05763).
+enum RKType {
+    RK3 = 0,
+    RK4,
+    RK45,
+    RK4_MSRK2_1,
+    RK4_MSRK2_2,
+    RK4_MSRK3,
+    RK5
+};
 
 namespace {{ namespace }} {
 
