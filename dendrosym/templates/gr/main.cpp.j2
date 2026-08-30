@@ -338,6 +338,17 @@ int main(int argc, char **argv) {
             ctx->set_is_merged(time, step);
             if (rank == 0)
                 std::cout << "[MERGER DETECTED] t=" << time << std::endl;
+
+            // Post-merger cadences, each inert at 0. The AMR factor itself is
+            // picked up inside is_remesh().
+            if ({{ namespace }}::{{ project_upper }}_REMESH_TEST_FREQ_AFTER_MERGER > 0)
+                remesh_freq =
+                    {{ namespace }}::{{ project_upper }}_REMESH_TEST_FREQ_AFTER_MERGER;
+{% if enable_gw_extraction %}
+            if ({{ namespace }}::{{ project_upper }}_GW_EXTRACT_FREQ_AFTER_MERGER > 0)
+                {{ namespace }}::{{ project_upper }}_GW_EXTRACT_FREQ =
+                    {{ namespace }}::{{ project_upper }}_GW_EXTRACT_FREQ_AFTER_MERGER;
+{% endif %}
         }
 
         if ((step % ts_output_freq) == 0) {

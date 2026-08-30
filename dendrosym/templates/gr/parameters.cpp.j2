@@ -56,6 +56,11 @@ mem::memory_pool<double> {{ project_upper }}_MEM_POOL = mem::memory_pool<double>
 BH BH1;
 BH BH2;
 Point {{ project_upper }}_BH_LOC[2];
+unsigned int {{ project_upper }}_REMESH_TEST_FREQ_AFTER_MERGER = 0;
+double {{ project_upper }}_DENDRO_AMR_FAC_POST_MERGER = 0.0;
+{% if enable_gw_extraction %}
+unsigned int {{ project_upper }}_GW_EXTRACT_FREQ_AFTER_MERGER = 0;
+{% endif %}
 double {{ project_upper }}_BH_MERGE_TIME = std::numeric_limits<double>::max();
 unsigned int {{ project_upper }}_BH_MERGE_STEP = std::numeric_limits<unsigned int>::max();
 unsigned int {{ project_upper }}_BH1_MAX_LEV = 15;
@@ -411,6 +416,16 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     READ_REQUIRED("solver", "dendro_grain_sz", {{ project_upper }}_DENDRO_GRAIN_SZ);
     READ_REQUIRED("solver", "async_comm_k", {{ project_upper }}_ASYNC_COMM_K);
     READ_REQUIRED("solver", "dendro_amr_fac", {{ project_upper }}_DENDRO_AMR_FAC);
+{% if enable_bh_tracking %}
+    READ_OPTIONAL("solver", "dendro_amr_fac_post_merger",
+                  {{ project_upper }}_DENDRO_AMR_FAC_POST_MERGER);
+    READ_OPTIONAL("solver", "remesh_test_freq_after_merger",
+                  {{ project_upper }}_REMESH_TEST_FREQ_AFTER_MERGER);
+{% if enable_gw_extraction %}
+    READ_OPTIONAL("solver", "gw_extract_freq_after_merger",
+                  {{ project_upper }}_GW_EXTRACT_FREQ_AFTER_MERGER);
+{% endif %}
+{% endif %}
     READ_REQUIRED("solver", "load_imb_tol", {{ project_upper }}_LOAD_IMB_TOL);
 
     READ_OPTIONAL("solver", "ele_order", {{ project_upper }}_ELE_ORDER);
@@ -833,6 +848,16 @@ void dumpParamFile(std::ostream& sout, int root, MPI_Comm comm) {
     sout << "restore_solver = " << {{ project_upper }}_RESTORE_SOLVER << std::endl;
     sout << "dendro_grain_sz = " << {{ project_upper }}_DENDRO_GRAIN_SZ << std::endl;
     sout << "dendro_amr_fac = " << {{ project_upper }}_DENDRO_AMR_FAC << std::endl;
+{% if enable_bh_tracking %}
+    sout << "dendro_amr_fac_post_merger = "
+         << {{ project_upper }}_DENDRO_AMR_FAC_POST_MERGER << std::endl;
+    sout << "remesh_test_freq_after_merger = "
+         << {{ project_upper }}_REMESH_TEST_FREQ_AFTER_MERGER << std::endl;
+{% if enable_gw_extraction %}
+    sout << "gw_extract_freq_after_merger = "
+         << {{ project_upper }}_GW_EXTRACT_FREQ_AFTER_MERGER << std::endl;
+{% endif %}
+{% endif %}
     sout << "load_imb_tol = " << {{ project_upper }}_LOAD_IMB_TOL << std::endl;
     sout << "async_comm_k = " << {{ project_upper }}_ASYNC_COMM_K << std::endl;
     sout << "init_grid_iter = " << {{ project_upper }}_INIT_GRID_ITER << std::endl;

@@ -945,7 +945,16 @@ void {{ project_upper }}Ctx::write_grid_summary_data() {
 bool {{ project_upper }}Ctx::is_remesh() {
     if ({{ project_upper }}_REFINEMENT_MODE == REFINE_MODE_NONE) return false;
 
-    auto run_wamr = [this]() {
+    // Pre-merger the par's AMR factor stands. After a merger there is one
+    // object where there were two, so a coarser factor is usually enough;
+    // 0 (the default) leaves the pre-merger value in place.
+    double amr_coarse_fac = {{ project_upper }}_DENDRO_AMR_FAC;
+{% if enable_bh_tracking %}
+    if (m_bIsBHMerged && {{ project_upper }}_DENDRO_AMR_FAC_POST_MERGER > 0.0)
+        amr_coarse_fac = {{ project_upper }}_DENDRO_AMR_FAC_POST_MERGER;
+{% endif %}
+
+    auto run_wamr = [this, amr_coarse_fac]() {
         this->unzip(m_var[VL::CPU_EV], m_var[VL::CPU_EV_UZ_IN],
                     {{ project_upper }}_ASYNC_COMM_K);
         DendroScalar *unzipVar[{{ evolution_num_vars }}];
@@ -959,7 +968,7 @@ bool {{ project_upper }}Ctx::is_remesh() {
             {{ project_upper }}_REFINE_VARIABLE_INDICES,
             {{ project_upper }}_NUM_REFINE_VARS,
             wtolFn,
-            {{ project_upper }}_DENDRO_AMR_FAC);
+            amr_coarse_fac);
     };
 
 {% if enable_bh_tracking %}

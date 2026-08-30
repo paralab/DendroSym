@@ -61,6 +61,14 @@ vtu_z_slice = true
 dendro_grain_sz = 50
 async_comm_k = 4
 dendro_amr_fac = 0.1
+{% if enable_bh_tracking %}
+# post-merger overrides; 0 keeps the pre-merger value
+dendro_amr_fac_post_merger = 0.0
+remesh_test_freq_after_merger = 0
+{% if enable_gw_extraction %}
+gw_extract_freq_after_merger = 0
+{% endif %}
+{% endif %}
 load_imb_tol = 0.1
 remesh_test_freq = 10
 init_grid_iter = 10

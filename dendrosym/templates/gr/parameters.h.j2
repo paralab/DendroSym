@@ -77,6 +77,14 @@ extern unsigned int {{ project_upper }}_CURRENT_RK_STEP;
 extern double* {{ project_upper }}_DERIV_WORKSPACE;
 extern double {{ project_upper }}_CURRENT_MIN_DX;
 {% if enable_bh_tracking %}
+// Post-merger overrides. Each is inert at 0, so a par that does not mention
+// them behaves exactly as before. A remnant is one object where there were two,
+// so it tolerates a coarser grid and a slower remesh cadence.
+extern unsigned int {{ project_upper }}_REMESH_TEST_FREQ_AFTER_MERGER;
+extern double {{ project_upper }}_DENDRO_AMR_FAC_POST_MERGER;
+{% if enable_gw_extraction %}
+extern unsigned int {{ project_upper }}_GW_EXTRACT_FREQ_AFTER_MERGER;
+{% endif %}
 extern double {{ project_upper }}_BH_MERGE_TIME;
 extern unsigned int {{ project_upper }}_BH_MERGE_STEP;
 {% endif %}
