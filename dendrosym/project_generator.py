@@ -665,6 +665,47 @@ def _run_var_type(args):
 # ---------------------------------------------------------------------------
 
 
+# BHaHAHA's input transform reads a fixed 14-slot layout: the conformal factor,
+# the trace of the extrinsic curvature, then At[6] and gt[6] in canonical i<=j
+# order. A config that does not set `ah_input_vars` gets that layout derived from
+# its own variable names -- but only on an EXACT match.
+#
+# The previous version of this lived in parameters.cpp.j2 and matched
+# `vname.startswith('At')`, which also swallowed EDCS's AtSecondOrder00..22 and
+# handed the horizon finder six wrong components as the metric. Nothing reports
+# that: the finder just never converges. A formulation that does not have these
+# names must say what to use, or say it does not want the finder.
+_AH_SYM_COMPONENTS = ("00", "01", "02", "11", "12", "22")
+
+
+def _resolve_ah_input_vars(config, evolution_var_names):
+    """The 14 evolution variables BHaHAHA reads, in transform order."""
+    explicit = getattr(config, "ah_input_vars", None)
+    if explicit:
+        return list(explicit)
+
+    names = list(evolution_var_names)
+    present = set(names)
+    trace = [n for n in ("trK", "K") if n in present]
+    wanted = (["chi"] + trace
+              + [f"At{c}" for c in _AH_SYM_COMPONENTS]
+              + [f"gt{c}" for c in _AH_SYM_COMPONENTS])
+    missing = [n for n in wanted if n not in present]
+
+    if len(trace) != 1 or missing:
+        why = ("no single trace variable (expected exactly one of trK/K)"
+               if len(trace) != 1 else f"missing {missing}")
+        raise RuntimeError(
+            "enable_ah is on but the BSSN-style apparent-horizon input mapping "
+            f"cannot be derived for '{config.project_name}': {why}.\n"
+            "Set ah_input_vars (and ah_transform_body) on the config to name the "
+            "14 variables BHaHAHA should read -- chi, trace(K), At[6], gt[6], in "
+            "that order -- or set enable_ah = False. It is not guessed by prefix: "
+            "a near-miss silently feeds the finder the wrong components."
+        )
+    return wanted
+
+
 def build_template_map(ctx):
     """Output path -> template path, for one template context.
 
@@ -969,14 +1010,17 @@ class DendroProjectGenerator:
         # When set, main.cpp.j2 emits the registration call and solver_common
         # picks up src/<project>_tpid_writer.cpp.
         ctx["tpid_writer"] = getattr(c, "tpid_writer", "")
-        # AH finder: on by default for GR, gated by a compile-time cmake flag
-        ctx["enable_ah"] = getattr(c, "enable_ah", True)
-        # AH metric-input mapping (formulation-specific). When set, the template
-        # builds AH_INDICES from ah_input_vars and the BHaHAHA input transform
-        # from ah_transform_body; otherwise it falls back to the BSSN-style
-        # (chi, trK, At, gt) default. Z4 formulations (CCZ4) must supply these
-        # since the evolved trace is Khat = K - 2 s Theta, not a bare trK.
-        ctx["ah_input_vars"] = getattr(c, "ah_input_vars", None)
+        # AH finder: OFF unless the config asks for it. It used to default on,
+        # which meant a scalar-wave solver linked BHaHAHA and carried a
+        # BSSN-shaped input transform it could never use.
+        ctx["enable_ah"] = getattr(c, "enable_ah", False)
+        # AH metric-input mapping (formulation-specific). Z4 formulations (CCZ4)
+        # must supply these, since the evolved trace is Khat = K - 2 s Theta and
+        # not a bare trK.
+        ctx["ah_input_vars"] = (
+            _resolve_ah_input_vars(c, ctx.get("evolution_var_names", []))
+            if ctx["enable_ah"] else []
+        )
         ctx["ah_transform_body"] = getattr(c, "ah_transform_body", None)
 
         # derivative system: if set, emit DendroDerivatives method calls

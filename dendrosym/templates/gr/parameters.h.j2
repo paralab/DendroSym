@@ -285,9 +285,11 @@ static const unsigned int {{ project_upper }}_GW_OUTPUT_PRECISION = 10;
 }  // namespace GW
 {% endif %}
 
+{% if enable_gw_extraction %}
 // gw extraction frequency (in project namespace for main loop access)
 namespace {{ namespace }} {
 extern unsigned int {{ project_upper }}_GW_EXTRACT_FREQ;
 }  // namespace {{ namespace }}
+{% endif %}
 
 #endif  // PARAMETERS_H

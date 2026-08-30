@@ -264,24 +264,16 @@ std::vector<int> NPHI_ARRAY                     = {16, 32, 64};
 int ENABLE_ETA_VARYING_ALG                      = 0;
 int VERBOSITY_LEVEL                             = 1;
 
-// which evolution variables BHaHAHA needs (chi, trK, At[6], gt[6])
-// NOTE: these indices must match the VAR enum order for this formulation.
-// the generator fills this from the python config's variable ordering.
-// order must be: chi, trK, At[6 symmetric], gt[6 symmetric]
-// to match the transform lambda below
+// which evolution variables BHaHAHA needs, in the order the input transform
+// below reads them: chi, the trace of K, At[6 symmetric], gt[6 symmetric].
+// Resolved and validated in project_generator._resolve_ah_input_vars -- either
+// straight from the config's ah_input_vars, or derived from the variable names
+// on an EXACT match. It is never guessed by prefix here: a near-miss (EDCS's
+// AtSecondOrder00 matching an `At` prefix) hands the horizon finder the wrong
+// six components, and the only symptom is a finder that will not converge.
 const std::vector<int> AH_INDICES = {
-{% if ah_input_vars %}{% for vname in ah_input_vars %}    {{ namespace }}::VAR::U_{{ vname | upper }},
-{% endfor %}{% else %}
-{% for vname in evolution_var_names %}{% if vname == 'chi' %}    {{ namespace }}::VAR::U_{{ vname | upper }},
-{% endif %}{% endfor %}
-{% for vname in evolution_var_names %}{% if vname in ['trK', 'K'] %}    {{ namespace }}::VAR::U_{{ vname | upper }},
-{% endif %}{% endfor %}
-{% for vname in evolution_var_names %}{% if vname.startswith('At') or vname.startswith('At_mat') %}    {{ namespace }}::VAR::U_{{ vname | upper }},
-{% endif %}{% endfor %}
-{% for vname in evolution_var_names %}{% if vname.startswith('gt') or vname.startswith('gt_mat') %}    {{ namespace }}::VAR::U_{{ vname | upper }},
-{% endif %}{% endfor %}
-{% endif %}
-};
+{% for vname in ah_input_vars %}    {{ namespace }}::VAR::U_{{ vname | upper }},
+{% endfor %}};
 
 }  // namespace AH
 #endif
@@ -296,10 +288,12 @@ unsigned int {{ project_upper }}_GW_L_MODES[9] = {2, 3, 4, 5, 6, 7, 8, 9, 10};
 }  // namespace GW
 {% endif %}
 
+{% if enable_gw_extraction %}
 namespace {{ namespace }} {
 // gw extraction frequency
 unsigned int {{ project_upper }}_GW_EXTRACT_FREQ = 0;  // 0 = disabled
 }  // namespace {{ namespace }}
+{% endif %}
 
 {% if enable_tpid %}
 namespace TPID {
@@ -625,11 +619,9 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     // =================================================================
 {% if enable_gw_extraction %}
     READ_OPTIONAL("wave_extraction", "extract_freq", {{ project_upper }}_GW_EXTRACT_FREQ);
-{% if enable_gw_extraction %}
     READ_OPTIONAL("wave_extraction", "num_radaii", GW::{{ project_upper }}_GW_NUM_RADAII);
     READ_OPTIONAL("wave_extraction", "num_lmodes", GW::{{ project_upper }}_GW_NUM_LMODES);
     // TODO: read radii and l_modes arrays from TOML
-{% endif %}
 {% endif %}
 
     // =================================================================
