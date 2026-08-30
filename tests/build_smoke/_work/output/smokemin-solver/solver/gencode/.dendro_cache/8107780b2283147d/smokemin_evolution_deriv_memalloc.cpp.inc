@@ -1,9 +1,0 @@
-double * u_x = deriv_base + 0 * BLK_SZ;
-double * u_y = deriv_base + 1 * BLK_SZ;
-double * u_z = deriv_base + 2 * BLK_SZ;
-double * v_x = deriv_base + 3 * BLK_SZ;
-double * v_y = deriv_base + 4 * BLK_SZ;
-double * v_z = deriv_base + 5 * BLK_SZ;
-double * u_xx = deriv_base + 6 * BLK_SZ;
-double * u_yy = deriv_base + 7 * BLK_SZ;
-double * u_zz = deriv_base + 8 * BLK_SZ;
