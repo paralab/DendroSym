@@ -942,6 +942,22 @@ void {{ project_upper }}Ctx::write_grid_summary_data() {
 // remeshing
 // =========================================================================
 
+namespace {
+// One warning per process, not one per remesh test.
+void warn_unported_refinement(const char *asked, const char *used) {
+    static bool warned = false;
+    if (warned) return;
+    warned = true;
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (rank == 0)
+        std::cerr << "[refinement] " << asked << " is not implemented in this "
+                  << "solver; falling back to " << used
+                  << ". Set refinement_mode explicitly to silence this."
+                  << std::endl;
+}
+}  // namespace
+
 bool {{ project_upper }}Ctx::is_remesh() {
     if ({{ project_upper }}_REFINEMENT_MODE == REFINE_MODE_NONE) return false;
 
@@ -1001,7 +1017,16 @@ bool {{ project_upper }}Ctx::is_remesh() {
             const bool r2 = run_bh_loc(/*overwrite=*/false);
             return r1 || r2;
         }
-        default: return run_wamr();  // EH/EH_WAMR not yet ported
+        case EH:
+        case EH_WAMR:
+            // Not ported: isRemeshEH still lives in BSSN_GR/src/dataUtils.cpp
+            // and has no dendrolib equivalent. Say so once rather than quietly
+            // running WAMR, which looks like the run honoured the setting.
+            warn_unported_refinement("EH / EH_WAMR", "WAMR");
+            return run_wamr();
+        default:
+            warn_unported_refinement("this refinement mode", "WAMR");
+            return run_wamr();
     }
 {% else %}
     return run_wamr();
