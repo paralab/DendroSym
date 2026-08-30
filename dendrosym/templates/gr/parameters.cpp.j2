@@ -581,6 +581,7 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     READ_OPTIONAL_ARRAY("initial_data", "par_S_minus", TPID::par_S_minus);
     READ_OPTIONAL_ARRAY("initial_data", "center_offset", TPID::center_offset);
 
+{% if enable_bh_tracking %}
     // Seed the moving-puncture tracker from the TwoPunctures geometry:
     // the punctures sit at (center_offset +/- par_b * x_hat). Without explicit
     // [bh1]/[bh2] sections the tracked locations would otherwise default to the
@@ -593,6 +594,7 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
                                               TPID::center_offset[1],
                                               TPID::center_offset[2]);
     }
+{% endif %}
     READ_OPTIONAL("initial_data", "give_bare_mass", TPID::give_bare_mass);
     READ_OPTIONAL("initial_data", "initial_lapse", TPID::initial_lapse);
     // spectral solver tuning -- expose every TPID knob so the TOML can
