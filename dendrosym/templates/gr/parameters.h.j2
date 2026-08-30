@@ -133,7 +133,9 @@ extern std::string {{ project_upper }}_PROFILE_FILE_PREFIX;
 extern unsigned int {{ project_upper }}_NUM_EVOL_VARS_VTU_OUTPUT;
 extern unsigned int {{ project_upper }}_NUM_CONST_VARS_VTU_OUTPUT;
 extern unsigned int {{ project_upper }}_VTU_OUTPUT_EVOL_INDICES[{{ evolution_num_vars }}];
+{% if constraint_num_vars > 0 %}
 extern unsigned int {{ project_upper }}_VTU_OUTPUT_CONST_INDICES[{{ constraint_num_vars }}];
+{% endif %}
 // terminal_output norm selection: variable index lists (count = list length)
 extern std::vector<unsigned int> {{ project_upper }}_TERMINAL_OUTPUT_EVOL_INDICES;
 extern std::vector<unsigned int> {{ project_upper }}_TERMINAL_OUTPUT_CONST_INDICES;

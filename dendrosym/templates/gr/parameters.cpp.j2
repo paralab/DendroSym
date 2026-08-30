@@ -133,8 +133,6 @@ unsigned int {{ project_upper }}_VTU_OUTPUT_CONST_INDICES[{{ ncv }}] = {
 {% for i in range(ncv) %}    {{ i }}{{ "," if not loop.last else "" }}
 {% endfor %}
 };
-{% else %}
-unsigned int {{ project_upper }}_VTU_OUTPUT_CONST_INDICES[1] = {0};
 {% endif %}
 
 // which variables terminal_output computes norms for. Just list the indices in

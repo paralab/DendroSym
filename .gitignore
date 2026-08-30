@@ -148,3 +148,6 @@ cython_debug/
 # Markdown is not committed by default (findings/, local AGENTS.md, scratch notes stay local).
 # Already-tracked .md files (README.md, etc.) are unaffected; to track a new one, `git add -f`.
 *.md
+# build-smoke scratch (generated solvers + their build trees)
+tests/build_smoke/_work/
+output/
