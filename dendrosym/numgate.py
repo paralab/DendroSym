@@ -163,10 +163,9 @@ def numeval(expr, vals, funcs=None):
     Returns ``(value, n_nodes)``. `vals` maps leaf atoms (symbols and derivative
     markers) to mpmath numbers.
 
-    The cache stores ``(node, result)`` rather than just the result, keyed on
-    ``id(node)``. The node in that tuple is load-bearing: it holds a reference so
-    Python cannot free the object and reuse its id for a different node. Dropping
-    it silently corrupts results.
+    Keyed on ``id(node)``, so the cache stores ``(node, result)``: the node
+    reference keeps Python from freeing the object and reusing its id for a
+    different node. Dropping it corrupts results silently.
     """
     funcs = DEFAULT_FUNCS if funcs is None else funcs
     cache = {}

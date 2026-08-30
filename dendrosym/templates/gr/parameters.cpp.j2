@@ -264,13 +264,11 @@ std::vector<int> NPHI_ARRAY                     = {16, 32, 64};
 int ENABLE_ETA_VARYING_ALG                      = 0;
 int VERBOSITY_LEVEL                             = 1;
 
-// which evolution variables BHaHAHA needs, in the order the input transform
-// below reads them: chi, the trace of K, At[6 symmetric], gt[6 symmetric].
-// Resolved and validated in project_generator._resolve_ah_input_vars -- either
-// straight from the config's ah_input_vars, or derived from the variable names
-// on an EXACT match. It is never guessed by prefix here: a near-miss (EDCS's
-// AtSecondOrder00 matching an `At` prefix) hands the horizon finder the wrong
-// six components, and the only symptom is a finder that will not converge.
+// The evolution variables BHaHAHA reads, in the order the transform below
+// expects: chi, trace(K), At[6 symmetric], gt[6 symmetric]. Resolved in
+// project_generator._resolve_ah_input_vars, from the config's ah_input_vars or
+// by exact name match -- never by prefix, which once matched AtSecondOrder00
+// and fed the finder the wrong six components.
 const std::vector<int> AH_INDICES = {
 {% for vname in ah_input_vars %}    {{ namespace }}::VAR::U_{{ vname | upper }},
 {% endfor %}};

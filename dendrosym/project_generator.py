@@ -666,16 +666,14 @@ def _run_var_type(args):
 # ---------------------------------------------------------------------------
 
 
-# BHaHAHA's input transform reads a fixed 14-slot layout: the conformal factor,
-# the trace of the extrinsic curvature, then At[6] and gt[6] in canonical i<=j
-# order. A config that does not set `ah_input_vars` gets that layout derived from
-# its own variable names -- but only on an EXACT match.
+# BHaHAHA's input transform reads 14 slots: chi, trace(K), At[6], gt[6] in
+# canonical i<=j order. Without an explicit `ah_input_vars` the list is derived
+# from the config's variable names, on an exact match only.
 #
-# The previous version of this lived in parameters.cpp.j2 and matched
-# `vname.startswith('At')`, which also swallowed EDCS's AtSecondOrder00..22 and
-# handed the horizon finder six wrong components as the metric. Nothing reports
-# that: the finder just never converges. A formulation that does not have these
-# names must say what to use, or say it does not want the finder.
+# The earlier version of this lived in parameters.cpp.j2 and matched
+# `vname.startswith('At')`, which also caught EDCS's AtSecondOrder00..22 and fed
+# the finder six wrong components as the metric. The only symptom is a finder
+# that does not converge.
 _AH_SYM_COMPONENTS = ("00", "01", "02", "11", "12", "22")
 
 
@@ -699,10 +697,10 @@ def _resolve_ah_input_vars(config, evolution_var_names):
         raise RuntimeError(
             "enable_ah is on but the BSSN-style apparent-horizon input mapping "
             f"cannot be derived for '{config.project_name}': {why}.\n"
-            "Set ah_input_vars (and ah_transform_body) on the config to name the "
-            "14 variables BHaHAHA should read -- chi, trace(K), At[6], gt[6], in "
-            "that order -- or set enable_ah = False. It is not guessed by prefix: "
-            "a near-miss silently feeds the finder the wrong components."
+            "Set ah_input_vars (and ah_transform_body) to name the 14 variables "
+            "BHaHAHA reads -- chi, trace(K), At[6], gt[6], in that order -- or "
+            "set enable_ah = False. Prefix matching is not used: a near-miss "
+            "feeds the finder the wrong components."
         )
     return wanted
 
@@ -829,6 +827,7 @@ class DendroProjectGenerator:
             # 3. Render templates -> src/ and include/
             print("Rendering templates...", file=sys.stderr)
             self._render_templates(output, ctx)
+            self._render_once_templates(output, ctx)
 
             # 4. Copy static files (derivs, etc.)
             print("Copying static files...", file=sys.stderr)
@@ -1011,9 +1010,17 @@ class DendroProjectGenerator:
         # When set, main.cpp.j2 emits the registration call and solver_common
         # picks up src/<project>_tpid_writer.cpp.
         ctx["tpid_writer"] = getattr(c, "tpid_writer", "")
-        # AH finder: OFF unless the config asks for it. It used to default on,
-        # which meant a scalar-wave solver linked BHaHAHA and carried a
-        # BSSN-shaped input transform it could never use.
+        # "ns::fn" -> the two halves the stub templates need. A bare name means
+        # the project namespace.
+        if "::" in ctx["tpid_writer"]:
+            _ns, _fn = ctx["tpid_writer"].rsplit("::", 1)
+        else:
+            _ns, _fn = c.project_name, ctx["tpid_writer"]
+        ctx["tpid_writer_namespace"] = _ns
+        ctx["tpid_writer_function"] = _fn
+        # AH finder: off unless the config asks for it. It used to default on,
+        # so a scalar-wave solver linked BHaHAHA and carried a BSSN-shaped input
+        # transform it could not use.
         ctx["enable_ah"] = getattr(c, "enable_ah", False)
         # AH metric-input mapping (formulation-specific). Z4 formulations (CCZ4)
         # must supply these, since the evolved trace is Khat = K - 2 s Theta and
@@ -1135,10 +1142,9 @@ class DendroProjectGenerator:
         else:
             ctx["symbolic_analytical_code"] = ""
 
-        # The feature table for CUSTOMIZE.md. Read from the RESOLVED ctx, not
-        # from the config: enable_analytical is switched on above when the
-        # config supplies analytical expressions, so a table built from the
-        # config's own attributes would tell the reader it is off.
+        # Feature table for CUSTOMIZE.md, read from the resolved ctx rather than
+        # the config: enable_analytical is switched on above when the config
+        # supplies analytical expressions.
         ctx["solver_features"] = [
             (flag, bool(ctx.get(flag, default)), doc)
             for flag, (default, doc) in sorted(SOLVER_FEATURES.items())
@@ -1278,6 +1284,36 @@ class DendroProjectGenerator:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(rendered)
             print(f"  wrote {out_rel}", file=sys.stderr)
+
+    def _render_once_templates(self, output: Path, ctx: dict):
+        """Render author-owned scaffolding, only when the file is absent.
+
+        The TPID ADM->evolution writer cannot be generated correctly in general:
+        it depends on how the formulation stores the trace of K. But no template
+        emitted it at all, so a new TPID solver failed to link with nothing
+        naming the missing file. A stub is better, provided regeneration never
+        overwrites a corrected one.
+        """
+        if not (ctx.get("enable_tpid") and ctx.get("tpid_writer")):
+            return
+
+        name = ctx["project_name"]
+        once = {
+            f"solver/include/{name}_tpid_writer.h": "gr/tpid_writer.h.j2",
+            f"solver/src/{name}_tpid_writer.cpp": "gr/tpid_writer.cpp.j2",
+        }
+        for out_rel, tmpl_name in once.items():
+            out_path = output / out_rel
+            if out_path.exists():
+                print(f"  kept {out_rel} (yours; not overwritten)",
+                      file=sys.stderr)
+                continue
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(
+                self.jinja_env.get_template(tmpl_name).render(**ctx)
+            )
+            print(f"  wrote {out_rel} (stub -- CHECK the trace mapping)",
+                  file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Static file copying

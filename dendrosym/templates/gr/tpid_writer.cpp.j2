@@ -1,0 +1,49 @@
+// {{ project_name }} per-point ADM -> evolution-variable writer for the
+// dendrolib TPID hook.
+//
+// Generated once, then yours: written only when absent, so edits survive a
+// regenerate.
+//
+// ---------------------------------------------------------------------------
+// CHECK THIS BEFORE TRUSTING A TPID RUN.
+//
+// TwoPunctures returns gtd, Atd, chi, trK and the lapse. The assignments below
+// are filled in by exact name match against the evolution variables; anything
+// that did not match stays zero. That is correct for a shift, a Gamma-driver
+// and a Z4 constraint variable at t=0, and wrong wherever the formulation
+// renames a quantity.
+//
+// Example: a Z4 formulation evolves Khat = K - 2 s Theta, not a bare trK, so
+// the trace matches nothing and is initialised to zero. Assign it here.
+// ---------------------------------------------------------------------------
+
+#include "{{ project_name }}_tpid_writer.h"
+
+#include "grDef.h"
+
+namespace {{ tpid_writer_namespace }} {
+
+void {{ tpid_writer_function }}(double *vars, const double gtd[3][3],
+                   const double Atd[3][3], double chi, double trK,
+                   double alpha) {
+    // everything not named below stays at its zero initial value
+{% for vname in evolution_var_names %}
+    vars[VAR::U_{{ vname | upper }}] = 0.0;
+{% endfor %}
+
+{% for vname in evolution_var_names %}
+{% if vname == 'alpha' %}
+    vars[VAR::U_{{ vname | upper }}] = alpha;
+{% elif vname == 'chi' %}
+    vars[VAR::U_{{ vname | upper }}] = chi;
+{% elif vname in ['trK', 'K'] %}
+    vars[VAR::U_{{ vname | upper }}] = trK;
+{% elif vname in ['gt00', 'gt01', 'gt02', 'gt11', 'gt12', 'gt22'] %}
+    vars[VAR::U_{{ vname | upper }}] = gtd[{{ vname[2] }}][{{ vname[3] }}];
+{% elif vname in ['At00', 'At01', 'At02', 'At11', 'At12', 'At22'] %}
+    vars[VAR::U_{{ vname | upper }}] = Atd[{{ vname[2] }}][{{ vname[3] }}];
+{% endif %}
+{% endfor %}
+}
+
+}  // namespace {{ tpid_writer_namespace }}

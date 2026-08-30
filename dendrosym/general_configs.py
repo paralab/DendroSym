@@ -61,17 +61,13 @@ def _transform_worker(args):
 # ---------------------------------------------------------------------------
 # Solver feature flags
 # ---------------------------------------------------------------------------
-# A config turns capabilities on by plain attribute assignment --
-# `cfg.enable_tpid = True`. That is convenient and, until this table existed,
-# completely unchecked: `cfg.enable_gw_extractoin = True` created a new
+# Capabilities are turned on by attribute assignment: `cfg.enable_tpid = True`.
+# That was unchecked -- `cfg.enable_gw_extractoin = True` just created a new
 # attribute, the generator's getattr fell back to the default, and the solver
-# came out silently missing the capability the author thought they had asked
-# for. Every documented silent bug in this project has been config-level, so
-# this is exactly the class worth refusing rather than absorbing.
+# came out without the capability.
 #
-# __setattr__ below rejects any `enable_*` name that is not a key here. Adding a
-# capability means adding it to this table -- which is also where the generated
-# CUSTOMIZE.md gets its list, so a new flag documents itself.
+# __setattr__ below rejects any `enable_*` name not keyed here. This table also
+# feeds the generated CUSTOMIZE.md, so a new flag documents itself.
 SOLVER_FEATURES = {
     "enable_analytical": (
         False,
@@ -168,12 +164,10 @@ class DendroConfiguration:
 
 
     def __setattr__(self, name, value):
-        """Refuse an `enable_*` flag this generator does not know about.
+        """Reject an `enable_*` flag the generator does not know.
 
         A misspelled flag is otherwise invisible: it lands as a new attribute,
-        the generator never reads it, and the solver is generated without the
-        capability. Failing here costs one traceback; not failing here costs a
-        run.
+        the generator never reads it, and the capability is silently absent.
         """
         if name.startswith("enable_") and name not in SOLVER_FEATURES:
             known = ", ".join(sorted(SOLVER_FEATURES))
