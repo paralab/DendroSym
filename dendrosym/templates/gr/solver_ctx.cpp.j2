@@ -1474,15 +1474,31 @@ void {{ project_upper }}Ctx::evolve_bh_loc() {
         Point({{ project_upper }}_COMPD_MAX[0], {{ project_upper }}_COMPD_MAX[1],
               {{ project_upper }}_COMPD_MAX[2])};
 
-    Point newLoc[2];
-    dendro_gr::trackPunctures(m_uiMesh, (double **)evar, beta_idx, m_uiBHLoc,
-                              newLoc, 2, grid_limits, domain_limits, dt);
-
-    // Pin an inert (mass-0) BH at its initial location; don't chase a
-    // nonexistent well. No-op for a real binary (both > tol).
+    // Track only the active punctures. An inert (mass-0) BH is parked far
+    // outside the domain, and passing it to the tracker anyway makes
+    // interpolateToCoords warn once per step about a point it cannot reach --
+    // which is most of the log volume on a single-puncture run. No-op for a
+    // real binary (both > tol).
     constexpr double BH_ACTIVE_MASS_TOL = 1.0e-6;
-    if (BH1.getBHMass() > BH_ACTIVE_MASS_TOL) m_uiBHLoc[0] = newLoc[0];
-    if (BH2.getBHMass() > BH_ACTIVE_MASS_TOL) m_uiBHLoc[1] = newLoc[1];
+    const bool active[2] = {BH1.getBHMass() > BH_ACTIVE_MASS_TOL,
+                            BH2.getBHMass() > BH_ACTIVE_MASS_TOL};
+
+    Point trackIn[2], trackOut[2];
+    unsigned int slot[2] = {0, 0};
+    unsigned int nActive = 0;
+    for (unsigned int b = 0; b < 2; b++) {
+        if (!active[b]) continue;
+        slot[nActive] = b;
+        trackIn[nActive++] = m_uiBHLoc[b];
+    }
+
+    if (nActive > 0) {
+        dendro_gr::trackPunctures(m_uiMesh, (double **)evar, beta_idx, trackIn,
+                                  trackOut, nActive, grid_limits, domain_limits,
+                                  dt);
+        for (unsigned int i = 0; i < nActive; i++)
+            m_uiBHLoc[slot[i]] = trackOut[i];
+    }
     {{ project_upper }}_BH_LOC[0] = m_uiBHLoc[0];
     {{ project_upper }}_BH_LOC[1] = m_uiBHLoc[1];
     store_bh_loc_history();
