@@ -71,6 +71,8 @@ class {{ project_upper }}Ctx : public ts::Ctx<{{ project_upper }}Ctx, DendroScal
     DendroIntL m_uiGlobalMeshElements;
     DendroIntL m_uiGlobalGridPoints;
     bool m_uiWroteGridInfoHeader;
+    // constraint-norm CSV: header once per run, rows appended after
+    bool m_uiWroteConstraintHeader = false;
 
    public:
     {{ project_upper }}Ctx(ot::Mesh *pMesh);

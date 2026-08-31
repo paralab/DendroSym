@@ -863,6 +863,18 @@ int {{ project_upper }}Ctx::terminal_output() {
             }
         }
 
+        // Machine-readable companion to the [con] lines below. BSSN writes
+        // <prefix>_Constraints.dat (grUtils.tcc, extractConstraints); this is
+        // the same idea with the norms this solver already computes. Any
+        // convergence, damping or cross-code figure needs the series in a file,
+        // not in scrollback.
+        std::ostringstream consHdr, consRow;
+        // precision on the stringstream, not on the file: the row is already a
+        // formatted string by the time it is written, and 6 significant digits
+        // is not enough to fit a convergence order against.
+        consRow << std::setprecision(14);
+        consRow << m_uiTinfo._m_uiStep << "," << m_uiTinfo._m_uiT;
+
         // constraints -> 0 in the continuum, so RMS is the violation directly
         for (unsigned int v : termConsSel) {
             if (v >= {{ constraint_num_vars }}) continue;
@@ -914,6 +926,19 @@ int {{ project_upper }}Ctx::terminal_output() {
             }
 
             if (rank == 0) {
+                const std::string cname(
+                    {{ project_upper }}_VAR_CONSTRAINT_NAMES[v]);
+                consHdr << "," << cname << "_MIN," << cname << "_MAX,"
+                        << cname << "_RMS," << cname << "_RMS_VOL";
+                consRow << "," << l_min << "," << l_max << "," << rms << ","
+                        << rms_vol;
+{% if enable_bh_tracking %}
+                consHdr << "," << cname << "_RMS_MSK";
+                consRow << "," << rms_msk;
+{% endif %}
+                consHdr << "," << cname << "_RMS_INT";
+                consRow << "," << rms_int;
+
                 std::cout << "\t[con]:  " << std::setw(12)
                           << {{ project_upper }}_VAR_CONSTRAINT_NAMES[v]
 {% if enable_bh_tracking %}
@@ -927,6 +952,18 @@ int {{ project_upper }}Ctx::terminal_output() {
 {% endif %}
                           << std::endl;
             }
+        }
+
+        if (rank == 0) {
+            const std::string fName =
+                {{ project_upper }}_PROFILE_FILE_PREFIX + "_Constraints.csv";
+            if (!m_uiWroteConstraintHeader) {
+                std::ofstream f(fName, std::ofstream::trunc);
+                f << "Timestep,Time" << consHdr.str() << std::endl;
+                m_uiWroteConstraintHeader = true;
+            }
+            std::ofstream f(fName, std::ofstream::app);
+            f << consRow.str() << std::endl;
         }
     }
 {% endif %}
