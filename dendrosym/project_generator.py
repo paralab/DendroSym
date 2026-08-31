@@ -1301,6 +1301,9 @@ class DendroProjectGenerator:
         once = {
             f"solver/include/{name}_tpid_writer.h": "gr/tpid_writer.h.j2",
             f"solver/src/{name}_tpid_writer.cpp": "gr/tpid_writer.cpp.j2",
+            # the CMake builds <project>_tpid only `if(EXISTS src/tpid_main.cpp)`,
+            # so without this a TPID solver silently gets no spectral-solve binary
+            "solver/src/tpid_main.cpp": "gr/tpid_main.cpp.j2",
         }
         for out_rel, tmpl_name in once.items():
             out_path = output / out_rel
@@ -1312,8 +1315,9 @@ class DendroProjectGenerator:
             out_path.write_text(
                 self.jinja_env.get_template(tmpl_name).render(**ctx)
             )
-            print(f"  wrote {out_rel} (stub -- CHECK the trace mapping)",
-                  file=sys.stderr)
+            note = ("stub -- CHECK the trace mapping"
+                    if "tpid_writer" in out_rel else "stub -- yours to edit")
+            print(f"  wrote {out_rel} ({note})", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Static file copying
