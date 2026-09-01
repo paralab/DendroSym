@@ -153,7 +153,7 @@ class DendroCPrinter(C99CodePrinter):
             if idx1 > idx2:
                 idxtmp = idx1
                 idx1 = idx2
-                idx2 = idx1
+                idx2 = idxtmp
 
             return "grad2(%d, %d, %s)" % (idx1, idx2, self._print(differand))
 
