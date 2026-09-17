@@ -29,6 +29,7 @@
 #include <any>
 #include <cctype>
 #include <cstdlib>
+#include <initializer_list>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -358,6 +359,29 @@ inline bool try_read_array(const toml::value& root, const std::string& section,
                                          "{{ namespace }}::", "{{ project_upper }}_");
 }
 
+// Reject a par value this solver cannot honour, instead of falling back to a
+// different one. A one-time warning scrolls past in an MPI log and the run
+// continues with refinement or an integrator the par never asked for -- e.g. an
+// unimplemented wavelet tol function silently means a flat tolerance, so the
+// puncture-localized refinement the par describes never happens.
+inline void require_supported(const char* key, long long value,
+                              std::initializer_list<long long> supported,
+                              const char* explain, int rank) {
+    for (long long ok : supported)
+        if (value == ok) return;
+
+    if (rank == 0) {
+        std::cerr << RED << "UNSUPPORTED PARAMETER VALUE: " << key << " = "
+                  << value << NRM << std::endl;
+        std::cerr << "\tthis solver implements:";
+        for (long long ok : supported) std::cerr << " " << ok;
+        std::cerr << std::endl;
+        if (explain && *explain) std::cerr << "\t" << explain << std::endl;
+    }
+    throw std::runtime_error("Unsupported value for parameter: " +
+                             std::string(key));
+}
+
 }  // anonymous namespace
 
 void readParamFile(const char* inFile, MPI_Comm comm) {
@@ -400,6 +424,10 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     READ_REQUIRED("solver", "maxdepth", {{ project_upper }}_MAXDEPTH);
     READ_REQUIRED("solver", "dim", {{ project_upper }}_DIM);
     READ_REQUIRED("solver", "rk_type", {{ project_upper }}_RK_TYPE);
+    require_supported("[solver] rk_type", {{ project_upper }}_RK_TYPE,
+                      {0, 1, 2, 3, 4, 5, 6},
+                      "0 = RK3, 1 = RK4, 2 = RK45, 3/4 = RK4_MSRK2_1/2, "
+                      "5 = RK4_MSRK3, 6 = RK5.", rank);
     READ_REQUIRED("solver", "rk_time_begin", {{ project_upper }}_RK_TIME_BEGIN);
     READ_REQUIRED("solver", "rk_time_end", {{ project_upper }}_RK_TIME_END);
     READ_REQUIRED("solver", "rk45_time_step_size", {{ project_upper }}_RK45_TIME_STEP_SIZE);
@@ -479,9 +507,42 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     READ_OPTIONAL("refinement", "use_wavelet_tol_function", {{ project_upper }}_USE_WAVELET_TOL_FUNCTION);
     READ_OPTIONAL("refinement", "wavelet_tol_function_r0", {{ project_upper }}_WAVELET_TOL_FUNCTION_R0);
     READ_OPTIONAL("refinement", "wavelet_tol_function_r1", {{ project_upper }}_WAVELET_TOL_FUNCTION_R1);
+    require_supported("[refinement] use_wavelet_tol_function",
+                      {{ project_upper }}_USE_WAVELET_TOL_FUNCTION,
+                      {0, 1, 3},
+                      "0 = flat, 1 = linear ramp R0->R1, 3 = decade-exponential "
+                      "ramp R0->R1. The BSSN functions keyed on GW radii or "
+                      "BH-tracking state are not implemented here.", rank);
+
+    // A ramp needs a range in both radius and tolerance; without one it is flat,
+    // which is a different experiment than the par describes.
+    if ({{ project_upper }}_USE_WAVELET_TOL_FUNCTION != 0) {
+        if (!({{ project_upper }}_WAVELET_TOL_MAX > {{ project_upper }}_WAVELET_TOL) ||
+            !({{ project_upper }}_WAVELET_TOL_FUNCTION_R1 >
+              {{ project_upper }}_WAVELET_TOL_FUNCTION_R0)) {
+            if (rank == 0)
+                std::cerr << RED << "DEGENERATE WAVELET TOL RAMP: need "
+                          << "wavelet_tol_max > wavelet_tol and "
+                          << "wavelet_tol_function_r1 > wavelet_tol_function_r0"
+                          << NRM << std::endl;
+            throw std::runtime_error("Degenerate wavelet tolerance ramp");
+        }
+    }
+
     {
         unsigned int mode_int = static_cast<unsigned int>({{ project_upper }}_REFINEMENT_MODE);
         try_read(root, "refinement", "mode", mode_int);
+{% if enable_bh_tracking %}
+        require_supported("[refinement] mode", mode_int, {0, 3, 4, 5},
+                          "0 = WAMR, 3 = BH_LOC, 4 = BH_WAMR, 5 = none. "
+                          "1 (EH) and 2 (EH_WAMR) need isRemeshEH, which is not "
+                          "ported.", rank);
+{% else %}
+        require_supported("[refinement] mode", mode_int, {0, 5},
+                          "0 = WAMR, 5 = none. The BH-located modes need "
+                          "bh_tracking, which this solver was generated without.",
+                          rank);
+{% endif %}
         {{ project_upper }}_REFINEMENT_MODE = static_cast<RefinementMode>(mode_int);
     }
 {% if enable_bh_tracking %}
@@ -492,8 +553,21 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     // [dissipation]
     // =================================================================
     READ_REQUIRED("dissipation", "ko_diss_sigma", KO_DISS_SIGMA);
+
+    // use_const_ko and dissipation_type are declared and echoed but nothing
+    // reads them: KO comes from the derivative engine's post-RHS filter. Setting
+    // either to a non-default value would describe dissipation the run does not
+    // do, so refuse instead of accepting it silently.
     READ_OPTIONAL("dissipation", "use_const_ko", USE_CONST_KO);
     READ_OPTIONAL("dissipation", "dissipation_type", DISSIPATION_TYPE);
+    if (USE_CONST_KO)
+        require_supported("[dissipation] use_const_ko", 1, {0},
+                          "not implemented: KO dissipation is applied by the "
+                          "derivative engine's post_rhs_filter, which has no "
+                          "constant-coefficient mode here.", rank);
+    require_supported("[dissipation] dissipation_type", DISSIPATION_TYPE, {0},
+                      "not implemented: only the derivative engine's "
+                      "post_rhs_filter applies dissipation.", rank);
 
     // =================================================================
     // [physics] - Equation-specific parameters
@@ -795,6 +869,37 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     #undef READ_OPTIONAL
     #undef READ_REQUIRED_ARRAY
     #undef READ_OPTIONAL_ARRAY
+
+    // Say once what refinement this run actually does. The profile is a par
+    // integer whose meaning differs between codes -- BSSN's function 3 re-anchors
+    // its ramp on the outermost GW radius past t = r1 + 5, ours never does -- so a
+    // log that only records the integer cannot be compared against another code.
+    if (rank == 0) {
+        std::cout << "[{{ project_name }}] refinement: mode="
+                  << static_cast<unsigned int>({{ project_upper }}_REFINEMENT_MODE);
+        switch ({{ project_upper }}_REFINEMENT_MODE) {
+            case WAMR:    std::cout << " (WAMR)"; break;
+            case BH_LOC:  std::cout << " (BH_LOC onion)"; break;
+            case BH_WAMR: std::cout << " (WAMR + BH_LOC onion)"; break;
+            case REFINE_MODE_NONE: std::cout << " (none, mesh frozen)"; break;
+            default:      std::cout << " (?)"; break;
+        }
+        std::cout << ", wavelet profile=" << {{ project_upper }}_USE_WAVELET_TOL_FUNCTION;
+        if ({{ project_upper }}_USE_WAVELET_TOL_FUNCTION == 0) {
+            std::cout << " (flat tol=" << {{ project_upper }}_WAVELET_TOL << ")";
+        } else {
+            std::cout << ({{ project_upper }}_USE_WAVELET_TOL_FUNCTION == 1
+                              ? " (linear"
+                              : " (decade-exponential")
+                      << " ramp, tol " << {{ project_upper }}_WAVELET_TOL << " at r<"
+                      << {{ project_upper }}_WAVELET_TOL_FUNCTION_R0 << " -> "
+                      << {{ project_upper }}_WAVELET_TOL_MAX << " at r="
+                      << {{ project_upper }}_WAVELET_TOL_FUNCTION_R1
+                      << ", time-independent)";
+        }
+        std::cout << ", finest element level=" << ({{ project_upper }}_MAXDEPTH - 2)
+                  << " (maxdepth-2)" << std::endl;
+    }
 
     if (rank == 0) {
         std::cout << GRN << "Parameter file loaded successfully." << NRM << std::endl;
