@@ -118,6 +118,11 @@ _CACHE_SCHEMA_VERSION = "v20"
 # jax-only change does not force every C++ solver into a cold regen.
 _JAX_META_VERSION = 1
 
+# Marker opening the provenance line every gencode file carries. Deliberately
+# carries no timestamp: a regen of unchanged equations must stay byte-identical,
+# which is the gate the caching story rests on.
+_STAMP_TAG = "dendrosym-stamp:"
+
 
 def _vt_worker_init(inner_workers):
     """Cap nested process_map worker count to avoid CPU oversubscription."""
@@ -297,6 +302,145 @@ def _patch_cached_jax(vt, gencode_dir, jax_meta):
         meta_path.write_text(json.dumps(meta))
     except Exception:
         pass
+
+
+def _gencode_stamp(config):
+    """The provenance line body: which config and schema produced a file.
+
+    A hand-edited or half-regenerated tree is otherwise indistinguishable from a
+    clean one -- a collaborator adding a parameter to the flat kernel by hand left
+    the cascade body one feature behind, and the binary ran the cascade.
+    """
+    return (f"{_STAMP_TAG} config {_config_source_sha(config) or 'unknown'} "
+            f"schema {_CACHE_SCHEMA_VERSION}")
+
+
+_GENCODE_MANIFEST = "gencode_provenance.json"
+
+
+def _gencode_body_sha(path: Path):
+    """SHA of a gencode file's content below its stamp line."""
+    text = path.read_text()
+    lines = text.split("\n")
+    if lines and _STAMP_TAG in lines[0]:
+        lines = lines[1:]
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
+
+
+def _stamp_gencode_dir(gencode_dir: Path, config):
+    """Stamp every emitted file and record a content manifest beside them.
+
+    Runs over cache hits too: a restored file was produced by this same config, so
+    the whole directory stays answerable to one question -- did all of this come
+    from the config sitting next to it? The stamp alone cannot catch a hand-edit
+    (editing a file does not change its stamp), which is why the manifest records
+    each file's content hash.
+    """
+    stamp = _gencode_stamp(config)
+    manifest_path = gencode_dir / _GENCODE_MANIFEST
+    if manifest_path.exists():
+        manifest_path.unlink()
+
+    for path in sorted(gencode_dir.iterdir()):
+        if not path.is_file():
+            continue
+        if path.suffix == ".json":
+            try:
+                rec = json.loads(path.read_text())
+            except Exception:
+                continue
+            if isinstance(rec, dict):
+                rec["_stamp"] = stamp
+                path.write_text(json.dumps(rec, indent=1))
+            continue
+        try:
+            text = path.read_text()
+        except Exception:
+            continue
+        lines = text.split("\n")
+        if lines and _STAMP_TAG in lines[0]:
+            lines = lines[1:]
+        path.write_text(f"// {stamp}\n" + "\n".join(lines))
+
+    files = {p.name: _gencode_body_sha(p)
+             for p in sorted(gencode_dir.iterdir())
+             if p.is_file() and p.suffix != ".json"}
+    manifest_path.write_text(json.dumps(
+        {"stamp": stamp, "files": files}, indent=1, sort_keys=True) + "\n")
+
+
+def _prune_stale_variant_gencode(gencode_dir: Path, prefix, vt, keep_cascade):
+    """Delete a kernel variant's files when this regen did not emit them.
+
+    `--no-cascade` writes no cascade files and used to delete none, so a build with
+    CASCADE_KERNEL=auto happily compiled a body left over from an earlier config.
+    """
+    if keep_cascade:
+        return []
+    removed = []
+    for path in sorted(gencode_dir.glob(f"{prefix}_{vt}_cascade_*")):
+        path.unlink()
+        removed.append(path.name)
+    if removed:
+        print(f"  [prune] {vt}: removed {len(removed)} stale cascade file(s) "
+              f"(cascade is off for this regen)", file=sys.stderr)
+    return removed
+
+
+_PARAM_INDEX_RE = re.compile(r"\b([A-Za-z_][A-Za-z_0-9]*)\[(\d+)\]")
+
+
+def _config_param_names(config):
+    """Names the config's parameter arrays carry in emitted code (`kappa`, `xi`)."""
+    names = set()
+    for param_list in (config.all_vars.get("parameter", {}) or {}).values():
+        for pvar in param_list:
+            names.add(pvar.var_name)
+    return names
+
+
+def _indexed_params(text, param_names):
+    """Parameter-array references (`kappa[0]`).
+
+    Restricted to names the config actually declares: a bare `name[0]` also matches
+    wrapper locals and block geometry (`pmin[0]`, `_a[4]`), which differ between the
+    kernels for legitimate reasons.
+    """
+    return {f"{n}[{i}]" for n, i in _PARAM_INDEX_RE.findall(text)
+            if n in param_names}
+
+
+def _check_kernel_parity(gencode_dir: Path, prefix, vt, param_names):
+    """The flat and cascade kernels must read the same parameters.
+
+    They are emitted independently from one config, so nothing else notices when
+    one of them is a feature behind -- the case that motivated this compares as a
+    cascade body with no `xi` beside a flat body that has it.
+    """
+    flat = gencode_dir / f"{prefix}_{vt}_rhs_eqns.cpp.inc"
+    # bodies only: the alias/wrapper files declare every parameter whether the
+    # body reads it or not, so unioning them hides a body that is a feature behind
+    cascade = sorted(gencode_dir.glob(f"{prefix}_{vt}_cascade_body*.cpp.inc"))
+    if not flat.exists() or not cascade:
+        return
+    flat_params = _indexed_params(flat.read_text(), param_names)
+    casc_params = set()
+    for path in cascade:
+        casc_params |= _indexed_params(path.read_text(), param_names)
+    missing = flat_params - casc_params
+    extra = casc_params - flat_params
+    if missing or extra:
+        detail = []
+        if missing:
+            detail.append(f"in the flat kernel but not the cascade: {sorted(missing)}")
+        if extra:
+            detail.append(f"in the cascade but not the flat kernel: {sorted(extra)}")
+        raise RuntimeError(
+            f"{vt}: the flat and cascade kernels disagree on parameters -- "
+            + "; ".join(detail)
+            + ". One of them is stale or hand-edited; regenerate rather than "
+              "patching a gencode file."
+        )
 
 
 def _config_source_sha(config):
@@ -913,6 +1057,8 @@ def build_template_map(ctx):
         # Common templates
         "CMakeLists.txt": "common/CMakeLists.txt.j2",
         "solver/CMakeLists.txt": "common/solver_CMakeLists.txt.j2",
+        # asks the generator's own record whether gencode/ is what it wrote
+        "solver/check_gencode.py": "common/check_gencode.py.j2",
     }
     return template_map
 
@@ -1014,6 +1160,11 @@ class DendroProjectGenerator:
                     "did not change)."
                 )
             self._finalize_gencode_ctx(ctx, ctx["var_types"])
+
+        # the stamp travels into the solver so a run's log identifies the
+        # equations it was built from -- "which build produced this result?" is
+        # otherwise unanswerable once results leave the machine that made them.
+        ctx["gencode_stamp"] = _gencode_stamp(self.config)
 
         if not gencode_only:
             # 3. Render templates -> src/ and include/
@@ -1420,6 +1571,16 @@ class DendroProjectGenerator:
             ctx.update(result)
             _save_cache(vt, vt_hashes[vt], gencode_dir, result, c,
                         expr_hash=expr_hashes[vt])
+
+        # provenance + consistency: a gencode dir must answer "did all of this
+        # come from the config next to it?", and the two kernels must agree.
+        for vt in active_vts:
+            spec = c.cascade_spec(vt) if hasattr(c, "cascade_spec") else None
+            _prune_stale_variant_gencode(gencode_dir, prefix, vt,
+                                         keep_cascade=spec is not None)
+            _check_kernel_parity(gencode_dir, prefix, vt,
+                                 _config_param_names(c))
+        _stamp_gencode_dir(gencode_dir, c)
 
         self._finalize_gencode_ctx(ctx, active_vts)
 

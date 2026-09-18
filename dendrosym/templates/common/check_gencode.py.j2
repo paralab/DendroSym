@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Verify solver/gencode/ is what the generator wrote.
+
+Generated equation code is not hand-editable: the flat and cascade kernels are
+emitted independently from one config, so patching one of them in place leaves
+the other a feature behind and the binary runs whichever the build selects. That
+failure is invisible in a diff of the config. This compares each file against the
+content hash recorded at generation time.
+
+Run by the build (target `check_gencode`), or by hand:
+    python3 solver/check_gencode.py [gencode_dir]
+Exit 0 clean, 1 on a mismatch, 2 when there is nothing to check.
+"""
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+STAMP_TAG = "dendrosym-stamp:"
+MANIFEST = "gencode_provenance.json"
+
+
+def body_sha(path):
+    lines = path.read_text().split("\n")
+    if lines and STAMP_TAG in lines[0]:
+        lines = lines[1:]
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
+
+
+def main(argv):
+    here = Path(__file__).resolve().parent
+    gencode = Path(argv[1]) if len(argv) > 1 else here / "gencode"
+    manifest_path = gencode / MANIFEST
+    if not manifest_path.is_file():
+        print(f"check_gencode: no {MANIFEST} in {gencode}; regenerate to create it")
+        return 2
+
+    rec = json.loads(manifest_path.read_text())
+    recorded = rec.get("files", {})
+    on_disk = {p.name: p for p in sorted(gencode.iterdir())
+               if p.is_file() and p.suffix != ".json"}
+
+    edited = [n for n, sha in recorded.items()
+              if n in on_disk and body_sha(on_disk[n]) != sha]
+    missing = [n for n in recorded if n not in on_disk]
+    extra = [n for n in on_disk if n not in recorded]
+
+    if not (edited or missing or extra):
+        print(f"check_gencode: {len(recorded)} files match {rec.get('stamp', '?')}")
+        return 0
+
+    print("check_gencode: FAILED -- generated code does not match the generator's record")
+    for n in edited:
+        print(f"  edited by hand:  {n}")
+    for n in missing:
+        print(f"  missing:         {n}")
+    for n in extra:
+        print(f"  not generated:   {n}")
+    print("Regenerate (python {{ project_name }}.py) rather than editing gencode;"
+          " put the change in the config or a template.")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -119,6 +119,25 @@ endmacro()
 target_link_libraries(solver_common PUBLIC quadmath)
 {% endif %}
 
+# ===========================
+# gencode provenance check
+# ===========================
+# A hand-edited gencode file compiles fine and silently disagrees with the other
+# kernel variant, so the build asks the generator's own record whether these files
+# are what it wrote. Advisory when python3 is absent -- a missing interpreter must
+# not block a build.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_custom_target(check_gencode ALL
+    COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/check_gencode.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/gencode"
+    COMMENT "Checking generated equation code against the generator's record"
+    VERBATIM)
+else()
+  message(STATUS "python3 not found -- skipping the gencode provenance check")
+endif()
+
 solver_add_executable({{ project_name }}Solver {{ project_name }}_main.cpp)
 
 {% if enable_tpid %}

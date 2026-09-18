@@ -126,6 +126,10 @@ extern unsigned int {{ project_upper }}_IO_OUTPUT_FREQ;
 extern unsigned int {{ project_upper }}_TIME_STEP_OUTPUT_FREQ;
 extern unsigned int {{ project_upper }}_CHECKPT_FREQ;
 extern bool {{ project_upper }}_RESTORE_SOLVER;
+// provenance of the generated equation code this binary was built from; printed
+// at startup so a result can be traced to the config that produced it
+extern const char* const {{ project_upper }}_GENCODE_STAMP;
+
 extern std::string {{ project_upper }}_VTU_FILE_PREFIX;
 extern std::string {{ project_upper }}_CHKPT_FILE_PREFIX;
 extern std::string {{ project_upper }}_PROFILE_FILE_PREFIX;

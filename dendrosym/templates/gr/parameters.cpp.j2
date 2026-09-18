@@ -117,6 +117,9 @@ unsigned int {{ project_upper }}_IO_OUTPUT_FREQ = 1000;
 unsigned int {{ project_upper }}_TIME_STEP_OUTPUT_FREQ = 10;
 unsigned int {{ project_upper }}_CHECKPT_FREQ = 5000;
 bool {{ project_upper }}_RESTORE_SOLVER = false;
+const char* const {{ project_upper }}_GENCODE_STAMP =
+    "{{ gencode_stamp | default('dendrosym-stamp: unknown') }}";
+
 std::string {{ project_upper }}_VTU_FILE_PREFIX = "vtu/{{ project_name }}_gr";
 std::string {{ project_upper }}_CHKPT_FILE_PREFIX = "cp/{{ project_name }}_cp";
 std::string {{ project_upper }}_PROFILE_FILE_PREFIX = "{{ project_name }}_prof";
@@ -902,6 +905,8 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     }
 
     if (rank == 0) {
+        std::cout << "[{{ project_name }}] gencode: "
+                  << {{ project_upper }}_GENCODE_STAMP << std::endl;
         std::cout << GRN << "Parameter file loaded successfully." << NRM << std::endl;
     }
 }
