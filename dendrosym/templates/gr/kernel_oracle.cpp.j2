@@ -1,0 +1,172 @@
+// Kernel oracle: the cascade evolution kernel must compute the flat kernel's RHS.
+//
+// Why this exists. The byte-identity gates protect the FLAT kernel (a cascade-only
+// change leaves the flat gencode identical by construction, so every other gate
+// stays green), the JAX parity gate compares against the FLAT body statement for
+// statement -- and {{ project_name }} RUNS THE CASCADE. Without this, every
+// equality claim in the project is anchored to a kernel production does not
+// execute. A misrouted alias or a dropped chunk reads as plausible numbers; this
+// project has shipped exactly that kind of permutation before.
+//
+// Scope: the precomputed-derivative cascade body against the flat body on ONE
+// identical state, both reading the same d.* buffers. It is an internal
+// consistency check between two emissions of the same equations -- a wrong
+// equation is invisible to it, since both sides derive from the same SymPy.
+// The fused body is out of scope: it computes its own derivatives, so comparing
+// it means comparing stencils, not algebra.
+//
+// Not bit-identity: the cascade assembles with VFMA(a,b,c) = a*b + c and the flat
+// body does not, so the two associate differently by design. The tolerance below
+// is a roundoff bound, not a fudge factor.
+//
+// Run: `make kernel_oracle && ./solver/kernel_oracle`   (exit 1 on failure)
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
+
+#include "gencode/{{ project_name }}_evolution_deriv_struct.cpp.inc"
+
+namespace {
+
+// A state the kernel can survive: a metric near flat rather than random numbers,
+// a positive lapse and conformal factor. Random values put sqrt/log/division of
+// nonsense into both kernels, which agree on NaN and prove nothing.
+double wiggle(unsigned int seed) {
+    // deterministic, no <random> divergence between libstdc++ versions
+    const double x = std::sin(1.0 + 2.399963 * static_cast<double>(seed));
+    return 0.05 * x;
+}
+
+bool is_metric_like(const std::string& v) {
+    return v.rfind("gt", 0) == 0;
+}
+bool is_diagonal_metric(const std::string& v) {
+    return v == "gt00" || v == "gt11" || v == "gt22";
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const unsigned int N = 64;          // points; the body is pointwise
+    const double tol = 1e-12;           // relative, per point
+
+    // ---- parameters (literals, so the oracle links nothing) ----
+{% for p in physics_params | default([]) %}
+{% if p.num_params > 1 %}
+    const {{ p.cpp_dtype }} {{ p.var_name }}[{{ p.num_params }}] = {
+{% for i in range(p.num_params) %}        static_cast<{{ p.cpp_dtype }}>({{ p.default[i] if p.default is iterable and p.default is not string else 1 }}),
+{% endfor %}    };
+{% else %}
+    const {{ p.cpp_dtype }} {{ p.var_name }} = static_cast<{{ p.cpp_dtype }}>({{ p.default }});
+{% endif %}
+{% endfor %}
+    // NOTE: do not introduce a second damping symbol here. The cascade alias
+    // file declares `__cascade_scalar_eta = eta` from the ambient `eta`, so a
+    // local one is shadowed and the two kernels silently run different damping
+    // -- which is exactly what this harness reported as a kernel bug on its
+    // first run. Both sides read the `eta` parameter declared above.
+
+    // ---- storage ----
+    std::vector<std::string> names = {
+{% for vname in evolution_var_names %}        "{{ vname }}",
+{% endfor %}    };
+    const unsigned int NV = names.size();
+    std::vector<std::vector<double>> field(NV, std::vector<double>(N, 0.0));
+    std::vector<std::vector<double>> rhs_flat(NV, std::vector<double>(N, 0.0));
+    std::vector<std::vector<double>> rhs_casc(NV, std::vector<double>(N, 0.0));
+
+    for (unsigned int v = 0; v < NV; ++v) {
+        for (unsigned int p = 0; p < N; ++p) {
+            const unsigned int s = v * 977u + p * 31u + 7u;
+            double val = wiggle(s);
+            if (is_diagonal_metric(names[v]))      val += 1.0;   // gt ~ delta
+            else if (is_metric_like(names[v]))     val *= 0.2;   // small off-diagonals
+            else if (names[v] == "chi")            val += 0.85;  // > 0
+            else if (names[v] == "alpha")          val += 0.90;  // > 0
+            field[v][p] = val;
+        }
+    }
+
+    // derivative buffers: small, smooth, and shared by both kernels -- this
+    // compares algebra, not stencils
+    {{ project_name }}_evolution_derivs_t d;
+    const unsigned int NDERIV = {{ project_name }}_evolution_derivs_t::count();
+    std::vector<double> dbuf(static_cast<size_t>(NDERIV) * N, 0.0);
+    for (size_t i = 0; i < dbuf.size(); ++i)
+        dbuf[i] = 0.3 * wiggle(static_cast<unsigned int>(i % 7919u));
+    d.bind(dbuf.data(), N);
+
+    struct {
+{% for vname in evolution_var_names %}        const double *{{ vname }};
+{% endfor %}    } in;
+    struct {
+{% for vname in evolution_var_names %}        double *{{ vname }};
+{% endfor %}    } out;
+
+{% for vname in evolution_var_names %}    in.{{ vname }} = field[{{ loop.index0 }}].data();
+{% endfor %}
+
+    // ---- flat kernel ----
+{% for vname in evolution_var_names %}    out.{{ vname }} = rhs_flat[{{ loop.index0 }}].data();
+{% endfor %}
+    {
+        for (unsigned int pp = 0; pp < N; ++pp) {
+#include "gencode/{{ project_name }}_evolution_rhs_eqns.cpp.inc"
+        }
+    }
+
+    // ---- cascade kernel (width-1 scalar macro set) ----
+{% for vname in evolution_var_names %}    out.{{ vname }} = rhs_casc[{{ loop.index0 }}].data();
+{% endfor %}
+    {
+#include "gencode/{{ project_name }}_evolution_cascade_macros_scalar.cpp.inc"
+#include "gencode/{{ project_name }}_evolution_cascade_alias.cpp.inc"
+        for (unsigned int pp = 0; pp < N; ++pp) {
+#include "gencode/{{ project_name }}_evolution_cascade_prologue.cpp.inc"
+#include "gencode/{{ project_name }}_evolution_cascade_body.cpp.inc"
+        }
+#include "gencode/{{ project_name }}_evolution_cascade_macros_undef.cpp.inc"
+    }
+
+    // ---- compare ----
+    int failures = 0;
+    double worst = 0.0;
+    std::string worst_var = "(none)";
+    for (unsigned int v = 0; v < NV; ++v) {
+        double vworst = 0.0;
+        for (unsigned int p = 0; p < N; ++p) {
+            const double a = rhs_flat[v][p], b = rhs_casc[v][p];
+            if (std::isnan(a) || std::isnan(b)) {
+                std::printf("  %-12s point %u: NaN (flat=%g cascade=%g)\n",
+                            names[v].c_str(), p, a, b);
+                ++failures;
+                continue;
+            }
+            const double scale = std::max(1.0, std::max(std::fabs(a), std::fabs(b)));
+            const double rel = std::fabs(a - b) / scale;
+            if (rel > vworst) vworst = rel;
+        }
+        if (vworst > worst) { worst = vworst; worst_var = names[v]; }
+        if (vworst > tol) {
+            std::printf("  %-12s max relative difference %.3e\n",
+                        names[v].c_str(), vworst);
+            ++failures;
+        }
+    }
+
+    if (failures) {
+        std::printf("kernel_oracle: FAILED -- the cascade kernel does not compute "
+                    "the flat kernel's RHS (%d variable(s) beyond %.0e)\n",
+                    failures, tol);
+        std::printf("  regenerate; if it persists the cascade emission is wrong "
+                    "for these equations, and the running solver is the cascade\n");
+        return 1;
+    }
+    std::printf("kernel_oracle: cascade == flat on %u points, %u variables "
+                "(worst %.3e on %s, tolerance %.0e)\n",
+                N, NV, worst, worst_var.c_str(), tol);
+    return 0;
+}

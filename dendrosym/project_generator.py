@@ -1119,6 +1119,10 @@ def build_template_map(ctx):
         "solver/CMakeLists.txt": "common/solver_CMakeLists.txt.j2",
         # asks the generator's own record whether gencode/ is what it wrote
         "solver/check_gencode.py": "common/check_gencode.py.j2",
+        # the cascade kernel is what runs; this is the only check that it
+        # computes what the flat kernel (and so the JAX twin) says it should
+        **({"solver/kernel_oracle.cpp": "gr/kernel_oracle.cpp.j2"}
+           if ctx.get("evolution_cascade") else {}),
     }
     return template_map
 

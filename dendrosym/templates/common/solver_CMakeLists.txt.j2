@@ -138,6 +138,19 @@ else()
   message(STATUS "python3 not found -- skipping the gencode provenance check")
 endif()
 
+{% if evolution_cascade is defined %}
+# ===========================
+# kernel oracle (cascade == flat)
+# ===========================
+# Not in ALL: it is a check you run after changing equations or the cascade, not
+# a cost on every build. Links nothing -- the kernels are headers and the
+# parameters are literals.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kernel_oracle.cpp")
+  add_executable(kernel_oracle EXCLUDE_FROM_ALL kernel_oracle.cpp)
+  target_compile_options(kernel_oracle PRIVATE -ffp-contract=off)
+endif()
+{% endif %}
+
 solver_add_executable({{ project_name }}Solver {{ project_name }}_main.cpp)
 
 {% if enable_tpid %}
