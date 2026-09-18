@@ -387,6 +387,66 @@ def _prune_stale_variant_gencode(gencode_dir: Path, prefix, vt, keep_cascade):
     return removed
 
 
+_RENDER_MANIFEST = "generated_provenance.json"
+
+
+def _template_set_sha(template_map):
+    """SHA over the templates that produced a tree.
+
+    The gencode stamp keys on the *config*, which cannot move when only a template
+    changes -- so the rendered half needs its own key or its provenance is blind to
+    exactly the edits that produce it.
+    """
+    h = hashlib.sha256()
+    for out_rel, tmpl_name in sorted(template_map.items()):
+        tmpl_path = _TEMPLATES_DIR / tmpl_name
+        h.update(out_rel.encode())
+        h.update(tmpl_path.read_bytes() if tmpl_path.exists() else b"<missing>")
+    return h.hexdigest()[:16]
+
+
+def _read_render_manifest(output: Path):
+    try:
+        return json.loads((output / _RENDER_MANIFEST).read_text())
+    except Exception:
+        return {}
+
+
+def _locally_edited_renders(output: Path, template_map):
+    """Rendered files whose content no longer matches what the generator wrote.
+
+    Silent on a tree with no manifest (generated before this existed, or by hand):
+    absence of a record is not evidence of an edit.
+    """
+    recorded = _read_render_manifest(output).get("files", {})
+    if not recorded:
+        return []
+    edited = []
+    for out_rel in sorted(template_map):
+        sha = recorded.get(out_rel)
+        path = output / out_rel
+        if sha is None or not path.exists():
+            continue
+        if hashlib.sha256(path.read_bytes()).hexdigest()[:16] != sha:
+            edited.append(out_rel)
+    return edited
+
+
+def _record_rendered_provenance(output: Path, template_map, config):
+    """Record what was just rendered, so the next regen can tell edits from drift."""
+    files = {}
+    for out_rel in sorted(template_map):
+        path = output / out_rel
+        if path.exists():
+            files[out_rel] = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    rec = _read_render_manifest(output)
+    rec.setdefault("files", {}).update(files)
+    rec["stamp"] = (f"{_gencode_stamp(config)} "
+                    f"templates {_template_set_sha(template_map)}")
+    (output / _RENDER_MANIFEST).write_text(
+        json.dumps(rec, indent=1, sort_keys=True) + "\n")
+
+
 _PARAM_INDEX_RE = re.compile(r"\b([A-Za-z_][A-Za-z_0-9]*)\[(\d+)\]")
 
 
@@ -1347,6 +1407,18 @@ class DendroProjectGenerator:
                 pos_floor_vars.append(vname)
         ctx["pos_floor_vars"] = pos_floor_vars
 
+        # -- par values this solver implements. One source for both the runtime
+        # validator and the message the fallback prints: a checker that keeps its
+        # own copy of a list drifts from the list, which is the bug class the
+        # template gate already exists to catch.
+        # Adding a case to computeWTolDCoords or the is_remesh switch means adding
+        # it here, or the reader will reject a value the solver now handles.
+        ctx["supported_wavelet_tol_functions"] = [0, 1, 3]
+        ctx["supported_rk_types"] = [0, 1, 2, 3, 4, 5, 6]
+        ctx["supported_refinement_modes"] = (
+            [0, 3, 4, 5] if getattr(c, "enable_bh_tracking", False) else [0, 5]
+        )
+
         # -- feature flags (templates use these to conditionally include code)
         ctx["enable_bh_tracking"] = getattr(c, "enable_bh_tracking", False)
         ctx["enable_gw_extraction"] = getattr(c, "enable_gw_extraction", False)
@@ -1716,6 +1788,24 @@ class DendroProjectGenerator:
         else:
             template_map = build_template_map(ctx)
 
+        # Refuse before writing anything, not halfway through: a rendered file
+        # edited by hand is destroyed by the next regen and the loss is silent --
+        # a hand-written dumpParamFile once cost 101 committed lines that way.
+        # This is the mirror of the gencode check, where the same edit survives
+        # and diverges instead.
+        edited = _locally_edited_renders(output, template_map)
+        if edited and os.environ.get("DENDRO_OVERWRITE_LOCAL_EDITS") != "1":
+            listing = "\n".join(f"  - {p}" for p in edited)
+            raise RuntimeError(
+                "these generated files have local edits a regen would "
+                f"destroy:\n{listing}\n"
+                "Put the change in the template (or the config) and regenerate. "
+                "To overwrite them anyway, set DENDRO_OVERWRITE_LOCAL_EDITS=1."
+            )
+        if edited:
+            print(f"  WARNING: overwriting {len(edited)} locally-edited file(s) "
+                  f"(DENDRO_OVERWRITE_LOCAL_EDITS=1)", file=sys.stderr)
+
         for out_rel, tmpl_name in template_map.items():
             tmpl_path = _TEMPLATES_DIR / tmpl_name
             if not tmpl_path.exists():
@@ -1732,6 +1822,8 @@ class DendroProjectGenerator:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(rendered)
             print(f"  wrote {out_rel}", file=sys.stderr)
+
+        _record_rendered_provenance(output, template_map, self.config)
 
     def _render_once_templates(self, output: Path, ctx: dict):
         """Render author-owned scaffolding, only when the file is absent.

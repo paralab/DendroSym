@@ -1186,6 +1186,9 @@ int {{ project_upper }}Ctx::write_checkpt() {
     if (rank == 0) {
         json meta;
         meta["format_version"] = {{ project_upper }}_CHKPT_FORMAT_VERSION;
+        // which equations this state was evolved with; a restart onto a
+        // different binary is otherwise silent
+        meta["gencode_stamp"] = {{ project_upper }}_GENCODE_STAMP;
         meta["num_evol_vars"]  = {{ evolution_num_vars }};
         // element order from the mesh (authoritative; m_uiElementOrder is not
         // guaranteed initialized in the ctx).

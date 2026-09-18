@@ -188,7 +188,9 @@ double computeWTolDCoords(double x, double y, double z, double *hx) {
                 std::cerr << "[{{ namespace }}] WARNING: use_wavelet_tol_function = "
                           << {{ project_upper }}_USE_WAVELET_TOL_FUNCTION
                           << " is not implemented; falling back to a flat "
-                             "wavelet_tol. Supported: 0, 1, 3." << std::endl;
+                             "wavelet_tol. Supported: "
+                             "{{ supported_wavelet_tol_functions | join(', ') }}."
+                          << std::endl;
             }
             return tolMin;
         }

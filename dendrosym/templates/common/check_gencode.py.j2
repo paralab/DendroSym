@@ -18,6 +18,7 @@ from pathlib import Path
 
 STAMP_TAG = "dendrosym-stamp:"
 MANIFEST = "gencode_provenance.json"
+RENDER_MANIFEST = "generated_provenance.json"
 
 
 def body_sha(path):
@@ -25,6 +26,23 @@ def body_sha(path):
     if lines and STAMP_TAG in lines[0]:
         lines = lines[1:]
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
+
+
+def check_rendered(project_root):
+    """Rendered templates against their own manifest; ([], 0, None) when absent."""
+    path = project_root / RENDER_MANIFEST
+    if not path.is_file():
+        return [], 0, None
+    rec = json.loads(path.read_text())
+    files = rec.get("files", {})
+    edited = []
+    for rel, sha in sorted(files.items()):
+        f = project_root / rel
+        if not f.is_file():
+            continue
+        if hashlib.sha256(f.read_bytes()).hexdigest()[:16] != sha:
+            edited.append(rel)
+    return edited, len(files), rec.get("stamp")
 
 
 def main(argv):
@@ -45,8 +63,15 @@ def main(argv):
     missing = [n for n in recorded if n not in on_disk]
     extra = [n for n in on_disk if n not in recorded]
 
+    # rendered templates (parameters.cpp, rhs.cpp, ...) fail the other way round:
+    # a hand-edit there is destroyed by the next regen rather than surviving it.
+    # Same question, so the same check.
+    r_edited, r_total, r_stamp = check_rendered(gencode.parent.parent)
+    edited += r_edited
+
     if not (edited or missing or extra):
-        print(f"check_gencode: {len(recorded)} files match {rec.get('stamp', '?')}")
+        print(f"check_gencode: {len(recorded)} generated + {r_total} rendered "
+              f"files match {rec.get('stamp', '?')}")
         return 0
 
     print("check_gencode: FAILED -- generated code does not match the generator's record")

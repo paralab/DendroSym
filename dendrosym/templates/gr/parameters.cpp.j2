@@ -29,7 +29,11 @@
 #include <any>
 #include <cctype>
 #include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
+#include <tuple>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -362,6 +366,97 @@ inline bool try_read_array(const toml::value& root, const std::string& section,
                                          "{{ namespace }}::", "{{ project_upper }}_");
 }
 
+// Create the directory a prefixed output path writes into.
+//
+// Dendro solvers otherwise die partway through a run the first time they touch a
+// missing output directory -- after the mesh build and however many steps, with a
+// failure that names a file rather than the directory. Doing it once up front, on
+// one rank, turns that into a startup error or (usually) no error at all.
+// `prefix` is a path prefix like "vtu/run" whose parent is the directory; a
+// `dir_itself` path (an AEH save dir) is the directory.
+inline bool ensure_output_dir(const std::string& path, bool dir_itself,
+                              const char* what, int rank, std::string& why) {
+    namespace fs = std::filesystem;
+    fs::path p(path);
+    fs::path dir = dir_itself ? p : p.parent_path();
+    if (dir.empty()) return true;  // writes into the working directory
+
+    std::error_code ec;
+    if (fs::exists(dir, ec)) {
+        if (fs::is_directory(dir, ec)) return true;
+        why = std::string(what) + ": '" + dir.string() + "' exists and is not a directory";
+        return false;
+    }
+    fs::create_directories(dir, ec);
+    if (ec) {
+        why = std::string(what) + ": cannot create '" + dir.string() + "' -- " + ec.message();
+        return false;
+    }
+    if (rank == 0)
+        std::cout << "[{{ project_name }}] created output directory '"
+                  << dir.string() << "' (" << what << ")" << std::endl;
+    return true;
+}
+
+// Rank 0 creates, everyone verifies: a shared filesystem makes concurrent
+// create_directories on 1k ranks pointless, and a per-rank check still catches a
+// node that cannot see the directory.
+inline void ensure_output_dirs(MPI_Comm comm) {
+    int rank = 0, npes = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &npes);
+
+    const std::vector<std::tuple<std::string, bool, const char*>> targets = {
+        {{ '{' }}{{ project_upper }}_VTU_FILE_PREFIX, false, "vtu_file_prefix"},
+        {{ '{' }}{{ project_upper }}_CHKPT_FILE_PREFIX, false, "chkpt_file_prefix"},
+        {{ '{' }}{{ project_upper }}_PROFILE_FILE_PREFIX, false, "profile_file_prefix"},
+        {DENDRO_LOG_FILE, false, "log_file"},
+{% if enable_ah %}
+        {AH::AH_SAVE_DIR, true, "apparent_horizon save_dir"},
+{% endif %}
+    };
+
+    std::string why;
+    int ok = 1;
+    if (rank == 0) {
+        for (const auto& t : targets) {
+            if (!ensure_output_dir(std::get<0>(t), std::get<1>(t), std::get<2>(t),
+                                   rank, why)) {
+                ok = 0;
+                break;
+            }
+        }
+    }
+    MPI_Bcast(&ok, 1, MPI_INT, 0, comm);
+    if (!ok) {
+        if (rank == 0)
+            std::cerr << RED << "OUTPUT DIRECTORY ERROR: " << why << NRM << std::endl;
+        MPI_Abort(comm, 1);
+    }
+
+    // every rank writes checkpoints and vtu, so every rank must see the directory
+    MPI_Barrier(comm);
+    if (npes > 1) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        int visible = 1;
+        for (const auto& t : targets) {
+            fs::path p(std::get<0>(t));
+            fs::path dir = std::get<1>(t) ? p : p.parent_path();
+            if (dir.empty()) continue;
+            if (!fs::is_directory(dir, ec)) {
+                std::cerr << RED << "OUTPUT DIRECTORY ERROR: rank " << rank
+                          << " cannot see '" << dir.string() << "' ("
+                          << std::get<2>(t) << ")" << NRM << std::endl;
+                visible = 0;
+            }
+        }
+        int all_visible = 1;
+        MPI_Allreduce(&visible, &all_visible, 1, MPI_INT, MPI_MIN, comm);
+        if (!all_visible) MPI_Abort(comm, 1);
+    }
+}
+
 // Reject a par value this solver cannot honour, instead of falling back to a
 // different one. A one-time warning scrolls past in an MPI log and the run
 // continues with refinement or an integrator the par never asked for -- e.g. an
@@ -428,7 +523,7 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     READ_REQUIRED("solver", "dim", {{ project_upper }}_DIM);
     READ_REQUIRED("solver", "rk_type", {{ project_upper }}_RK_TYPE);
     require_supported("[solver] rk_type", {{ project_upper }}_RK_TYPE,
-                      {0, 1, 2, 3, 4, 5, 6},
+                      {{ '{' }}{{ supported_rk_types | join(', ') }}},
                       "0 = RK3, 1 = RK4, 2 = RK45, 3/4 = RK4_MSRK2_1/2, "
                       "5 = RK4_MSRK3, 6 = RK5.", rank);
     READ_REQUIRED("solver", "rk_time_begin", {{ project_upper }}_RK_TIME_BEGIN);
@@ -512,7 +607,7 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     READ_OPTIONAL("refinement", "wavelet_tol_function_r1", {{ project_upper }}_WAVELET_TOL_FUNCTION_R1);
     require_supported("[refinement] use_wavelet_tol_function",
                       {{ project_upper }}_USE_WAVELET_TOL_FUNCTION,
-                      {0, 1, 3},
+                      {{ '{' }}{{ supported_wavelet_tol_functions | join(', ') }}},
                       "0 = flat, 1 = linear ramp R0->R1, 3 = decade-exponential "
                       "ramp R0->R1. The BSSN functions keyed on GW radii or "
                       "BH-tracking state are not implemented here.", rank);
@@ -535,13 +630,13 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
     {
         unsigned int mode_int = static_cast<unsigned int>({{ project_upper }}_REFINEMENT_MODE);
         try_read(root, "refinement", "mode", mode_int);
+        require_supported("[refinement] mode", mode_int,
+                          {{ '{' }}{{ supported_refinement_modes | join(', ') }}},
 {% if enable_bh_tracking %}
-        require_supported("[refinement] mode", mode_int, {0, 3, 4, 5},
                           "0 = WAMR, 3 = BH_LOC, 4 = BH_WAMR, 5 = none. "
                           "1 (EH) and 2 (EH_WAMR) need isRemeshEH, which is not "
                           "ported.", rank);
 {% else %}
-        require_supported("[refinement] mode", mode_int, {0, 5},
                           "0 = WAMR, 5 = none. The BH-located modes need "
                           "bh_tracking, which this solver was generated without.",
                           rank);
@@ -904,9 +999,35 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
                   << " (maxdepth-2)" << std::endl;
     }
 
+    // do this last: it needs every prefix the par may have overridden
+    ensure_output_dirs(comm);
+
     if (rank == 0) {
         std::cout << "[{{ project_name }}] gencode: "
                   << {{ project_upper }}_GENCODE_STAMP << std::endl;
+
+        // A results directory outlives the terminal it was produced in. Without
+        // this, a .csv or checkpoint cannot say which equations made it -- the
+        // question we could not answer about a collaborator's runs.
+        const std::string provFile =
+            {{ project_upper }}_PROFILE_FILE_PREFIX + "_provenance.txt";
+        std::ofstream prov(provFile);
+        if (prov) {
+            const std::time_t now = std::time(nullptr);
+            char when[64] = {0};
+            std::strftime(when, sizeof(when), "%Y-%m-%dT%H:%M:%S",
+                          std::gmtime(&now));
+            prov << "solver = {{ project_name }}\n"
+                 << "gencode = " << {{ project_upper }}_GENCODE_STAMP << "\n"
+                 << "par_file = " << inFile << "\n"
+                 << "mpi_ranks = " << npes << "\n"
+                 << "started_utc = " << when << "\n";
+            prov.close();
+        } else {
+            std::cerr << YLW << "\tcould not write " << provFile
+                      << " (results will not carry their provenance)" << NRM
+                      << std::endl;
+        }
         std::cout << GRN << "Parameter file loaded successfully." << NRM << std::endl;
     }
 }
