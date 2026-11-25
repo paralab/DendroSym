@@ -40,6 +40,10 @@ rk_time_begin = 0
 rk_time_end = 800
 rk45_time_step_size = 0.01
 rk45_desired_tol = 0.001
+{% if enable_lts %}
+time_stepper = "global"        # "global" (ts::ETS) or "lts" (local time stepping;
+                               # needs rk_type 0 or 1 and a non-value boundary mode)
+{% endif %}
 cfl_factor = 0.25
 
 # I/O
@@ -96,6 +100,20 @@ wavelet_tol_function_r1 = 220.0
 #   "{{ m.name }}": {{ m.summary }}
 {% endfor %}
 mode = "{{ boundary_modes[0].name }}"
+
+{% endif %}
+{% if enable_lts %}
+[lts]
+# read only when time_stepper = "lts"
+iface = 3                      # 3 or 15 (fourth order, +5% time)
+g_exchange = false             # with iface 15: result independent of the rank count
+ratio_cap = 64                 # largest coarse/fine step ratio; 0 = none, 1 = global
+rate_c = 2.0                   # stiff-rate step bound dt <= rate_c / rate
+wpart = false                  # work-weighted repartition at init
+partitioning_method = 0        # 0 = SFC
+{% if enable_bh_tracking %}
+fixed_punctures = false        # true: keep punctures at their initial BH_LOC
+{% endif %}
 
 {% endif %}
 [dissipation]

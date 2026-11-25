@@ -28,6 +28,9 @@
 #include "grUtils.h"
 #include "parameters.h"
 #include "{{ project_name }}Ctx.h"
+{% if enable_lts %}
+#include "{{ project_name }}_lts_driver.h"
+{% endif %}
 {% if tpid_writer %}
 #include "TwoPunctures.h"
 #include "{{ project_name }}_tpid_writer.h"
@@ -217,6 +220,23 @@ int main(int argc, char **argv) {
         {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE, ctx->get_mesh(),
         {{ namespace }}::{{ project_upper }}_NUM_DERIVATIVES);
 
+{% if enable_lts %}
+    if ({{ namespace }}::{{ project_upper }}_TIME_STEPPER == "lts") {
+        const int rc = {{ namespace }}::run_{{ project_name }}_lts(ctx, comm);
+        // a remesh inside the driver replaced the mesh the ctx holds
+        mesh = ctx->get_mesh();
+{% if enable_profiling %}
+        {{ namespace }}::timer::print_profile(comm);
+{% endif %}
+        delete ctx;
+        delete mesh;
+        if ({{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE != nullptr)
+            delete[] {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE;
+        MPI_Finalize();
+        return rc;
+    }
+
+{% endif %}
     // ETS_MSRK sets its own coefficients in the constructor; plain ETS takes
     // them from set_ets_coefficients. Both present the same Ctx interface.
     ts::ETS<DendroScalar, {{ namespace }}::{{ project_upper }}Ctx> *ets = nullptr;
@@ -394,6 +414,9 @@ int main(int argc, char **argv) {
     // final output
     ctx->compute_constraint_variables();
     ctx->write_vtu();
+{% if enable_lts %}
+    {{ namespace }}::dump_evar_bin(ctx->get_mesh(), ctx->get_evolution_vars());
+{% endif %}
 
     if (rank == 0) {
         std::cout << GRN << "========================================" << NRM << std::endl;

@@ -355,6 +355,131 @@ int {{ project_upper }}Ctx::post_timestep_blk(DendroScalar *unzipIn,
     DendroScalar *unzipOut, unsigned int *blkIDs, unsigned int numBlocks,
     DendroScalar *blk_dx) { return 0; }
 
+{% if enable_lts %}
+// =========================================================================
+// LTS solver contract: block hooks for {{ lts.stepper }}
+// =========================================================================
+
+ts::{{ lts.block_view }} {{ project_upper }}Ctx::block_view(unsigned int blk) const {
+    const Point oct_min({{ namespace }}::{{ project_upper }}_OCTREE_MIN[0],
+                        {{ namespace }}::{{ project_upper }}_OCTREE_MIN[1],
+                        {{ namespace }}::{{ project_upper }}_OCTREE_MIN[2]);
+    const Point oct_max({{ namespace }}::{{ project_upper }}_OCTREE_MAX[0],
+                        {{ namespace }}::{{ project_upper }}_OCTREE_MAX[1],
+                        {{ namespace }}::{{ project_upper }}_OCTREE_MAX[2]);
+    const Point dom_min({{ namespace }}::{{ project_upper }}_COMPD_MIN[0],
+                        {{ namespace }}::{{ project_upper }}_COMPD_MIN[1],
+                        {{ namespace }}::{{ project_upper }}_COMPD_MIN[2]);
+    const Point dom_max({{ namespace }}::{{ project_upper }}_COMPD_MAX[0],
+                        {{ namespace }}::{{ project_upper }}_COMPD_MAX[1],
+                        {{ namespace }}::{{ project_upper }}_COMPD_MAX[2]);
+    return ts::{{ lts.block_view }}(m_uiMesh->getLocalBlockList()[blk], oct_min,
+                         oct_max, dom_min, dom_max,
+                         {{ namespace }}::{{ project_upper }}_PADDING_WIDTH);
+}
+
+// The generated per-block kernel on block-local buffers: offset 0, the block's
+// own padded box. It reads no constraint variable (the audit checks that), so
+// no constraint slice is passed.
+int {{ project_upper }}Ctx::rhs_blk(const DendroScalar *in, DendroScalar *out,
+                                    unsigned int dof, unsigned int blk,
+                                    DendroScalar t) {
+    const ts::{{ lts.block_view }} b = block_view(blk);
+    const DendroScalar *unzipIn[{{ evolution_num_vars }}];
+    DendroScalar *unzipOut[{{ evolution_num_vars }}];
+    b.split(in, unzipIn, dof);
+    b.split(out, unzipOut, dof);
+    const DendroIntL offset = 0;
+    {{ project_name }}rhs(unzipOut, unzipIn, offset, b.ptmin, b.ptmax, b.sz,
+                          b.bflag, t, nullptr);
+    return 0;
+}
+
+void {{ project_upper }}Ctx::enforce_blk(DendroScalar *in, unsigned int dof,
+                                         unsigned int blk) {
+    const ts::{{ lts.block_view }} b = block_view(blk);
+    DendroScalar *vars[{{ evolution_num_vars }}];
+    b.split(in, vars, dof);
+    ts::{{ lts.enforced_nodes }}(b, [&](unsigned int node, bool) {
+        enforce_{{ project_name }}_constraints(
+            vars, node{{ ", m_preEnforceMin" if enforcement_monitors }});
+    });
+}
+
+int {{ project_upper }}Ctx::pre_stage_blk(DendroScalar *in, unsigned int dof,
+                                          unsigned int blk, DendroScalar t) {
+    enforce_blk(in, dof, blk);
+    return 0;
+}
+
+int {{ project_upper }}Ctx::post_stage_blk(DendroScalar *in, unsigned int dof,
+                                           unsigned int blk, DendroScalar t) {
+    return 0;
+}
+
+// Puncture tracking is refused under LTS (parameters.cpp), so there is nothing
+// to do at the start of a block step.
+int {{ project_upper }}Ctx::pre_timestep_blk(DendroScalar *in, unsigned int dof,
+                                             unsigned int blk, DendroScalar t) {
+    return 0;
+}
+
+int {{ project_upper }}Ctx::post_timestep_blk(DendroScalar *in, unsigned int dof,
+                                              unsigned int blk, DendroScalar t) {
+    enforce_blk(in, dof, blk);
+    return 0;
+}
+
+// What the global driver does after a remesh: the derivative workspace for the
+// new block sizes, the finest-level step, the grid statistics. The mpi context
+// and constraint vectors are rebuilt in grid_transfer; a relabel (remeshed =
+// false) changes neither the octree nor the step.
+void {{ project_upper }}Ctx::on_mesh_changed(bool remeshed) {
+    {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE = ts::realloc_deriv_workspace(
+        {{ namespace }}::{{ project_upper }}_DERIV_WORKSPACE, m_uiMesh,
+        {{ namespace }}::{{ project_upper }}_NUM_DERIVATIVES);
+    calculate_full_grid_size();
+    if (!remeshed) return;
+
+    {{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE = ts::compute_cfl_dt(
+        m_uiMesh, {{ namespace }}::{{ project_upper }}_CFL_FACTOR,
+        {{ namespace }}::{{ project_upper }}_COMPD_MAX[0] -
+            {{ namespace }}::{{ project_upper }}_COMPD_MIN[0],
+        {{ namespace }}::{{ project_upper }}_ELE_ORDER);
+    set_timestep({{ namespace }}::{{ project_upper }}_RK45_TIME_STEP_SIZE);
+}
+
+// Level offset of the step ladder. A block steps at its CFL step unless a stiff
+// rate in the equations (the audit found them) bounds it lower: the bound is
+// rate_c / max rate, the same on every block because the rates are parameters
+// here, not fields. With no rate, only the CFL step binds.
+unsigned int {{ project_upper }}Ctx::compute_lts_ts_offset() {
+    unsigned int lmin, lmax;
+    m_uiMesh->computeMinMaxLevel(lmin, lmax);
+    const double dt_min = {{ namespace }}::{{ project_upper }}_CFL_FACTOR *
+        (({{ namespace }}::{{ project_upper }}_COMPD_MAX[0] -
+          {{ namespace }}::{{ project_upper }}_COMPD_MIN[0]) *
+         ((1u << (m_uiMaxDepth - lmax)) /
+          ((double){{ namespace }}::{{ project_upper }}_ELE_ORDER)) /
+         ((double)(1u << m_uiMaxDepth)));
+
+    double rate = 0.0;
+{% for r in lts_rates %}
+    rate = std::max(rate, {{ r }});
+{% endfor %}
+    const double dt_stable = rate > 0.0
+        ? {{ namespace }}::{{ project_upper }}_LTS_RATE_C / rate
+        : std::numeric_limits<double>::infinity();
+
+    const unsigned int offset = ts::{{ lts.level_offset }}(
+        *m_uiMesh, lmax, dt_min, [&](unsigned int) { return dt_stable; },
+        m_uiMesh->getMPIGlobalCommunicator());
+    if (m_uiMesh->isActive() && !m_uiMesh->getMPIRankGlobal())
+        std::cout << "LTS offset : " << offset << std::endl;
+    return offset;
+}
+
+{% endif %}
 // =========================================================================
 // constraint computation
 // =========================================================================
@@ -1310,12 +1435,19 @@ static bool chkpt_slot_complete(int slot, MPI_Comm comm) {
     return allOk == 1;
 }
 
-int {{ project_upper }}Ctx::write_checkpt() {
+int {{ project_upper }}Ctx::write_checkpt({{ "int slot_override" if enable_lts }}) {
     if (!m_uiMesh->isActive()) return 0;
 
     const unsigned int rank = m_uiMesh->getMPIRank();
+{% if enable_lts %}
+    // the LTS clock picks the slot (a coarse step count need not alternate)
+    const unsigned int slot = slot_override >= 0
+        ? (unsigned int)slot_override
+        : (m_uiTinfo._m_uiStep / {{ project_upper }}_CHECKPT_FREQ) % 2;
+{% else %}
     const unsigned int slot =
         (m_uiTinfo._m_uiStep / {{ project_upper }}_CHECKPT_FREQ) % 2;
+{% endif %}
 
     char fname[512];
 
@@ -1350,6 +1482,9 @@ int {{ project_upper }}Ctx::write_checkpt() {
         // different binary is otherwise silent
         meta["gencode_stamp"] = {{ project_upper }}_GENCODE_STAMP;
         meta["num_evol_vars"]  = {{ evolution_num_vars }};
+{% if enable_lts %}
+        meta["time_stepper"]   = {{ project_upper }}_TIME_STEPPER;
+{% endif %}
         // element order from the mesh (authoritative; m_uiElementOrder is not
         // guaranteed initialized in the ctx).
         meta["ele_order"]      = m_uiMesh->getElementOrder();
@@ -1469,6 +1604,9 @@ int {{ project_upper }}Ctx::restore_checkpt() {
         return 0;
     }
 
+{% if enable_lts %}
+    m_restoredSlot = slot;
+{% endif %}
     // (2) every rank reads the (small) self-describing metadata for that slot.
     char fname[512];
     sprintf(fname, "%s_%d.meta.json",
@@ -1493,6 +1631,19 @@ int {{ project_upper }}Ctx::restore_checkpt() {
                       << std::endl;
         MPI_Abort(comm, 1);
     }
+{% if enable_lts %}
+    // a state written by one stepper is not a valid start for the other (LTS
+    // carries a stage vector the global stepper has no place for)
+    const std::string wrote_with = meta.value("time_stepper", std::string("global"));
+    if (wrote_with != {{ project_upper }}_TIME_STEPPER) {
+        if (!rank)
+            std::cerr << "[{{ project_name }}] checkpoint was written with time_stepper = \""
+                      << wrote_with << "\", this run is \""
+                      << {{ project_upper }}_TIME_STEPPER << "\"; refusing to restore."
+                      << std::endl;
+        MPI_Abort(comm, 1);
+    }
+{% endif %}
     const unsigned int active_comm_sz = meta["active_comm_sz"];
     // element order from the checkpoint (the ctx's m_uiElementOrder may be
     // unset here; the metadata value is authoritative for rebuilding the mesh).

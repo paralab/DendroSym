@@ -116,6 +116,23 @@ unsigned int {{ project_upper }}_RK_TYPE = 1;
 double {{ project_upper }}_RK45_TIME_STEP_SIZE = 0.01;
 double {{ project_upper }}_RK45_DESIRED_TOL = 0.001;
 double {{ project_upper }}_CFL_FACTOR = 0.25;
+{% if enable_lts %}
+
+// local time stepping (see parameters.h)
+std::string {{ project_upper }}_TIME_STEPPER = "global";
+unsigned int {{ project_upper }}_LTS_IFACE = 3;
+bool {{ project_upper }}_LTS_G_EXCHANGE = false;
+// 64 as in BSSN; 0 would mean no cap
+unsigned int {{ project_upper }}_LTS_RATIO_CAP = 64;
+// step bound from the stiff rates: dt <= RATE_C / rate (BSSN's eta_c is 2)
+double {{ project_upper }}_LTS_RATE_C = 2.0;
+// work-weighted repartition at init; off so LTS and the global stepper share a partition
+bool {{ project_upper }}_LTS_WPART = false;
+unsigned int {{ project_upper }}_PARTITIONING_METHOD = 0;
+{% if enable_bh_tracking %}
+bool {{ project_upper }}_LTS_FIXED_PUNCTURES = false;
+{% endif %}
+{% endif %}
 
 unsigned int {{ project_upper }}_IO_OUTPUT_FREQ = 1000;
 unsigned int {{ project_upper }}_TIME_STEP_OUTPUT_FREQ = 10;
@@ -975,6 +992,68 @@ void readParamFile(const char* inFile, MPI_Comm comm) {
                       << " (" << __what[__id] << ")" << std::endl;
     }
 {% endif %}
+{% if enable_lts %}
+
+    // [solver] time_stepper, [lts] -- local time stepping (ts::ExplicitNUTS).
+    // Settings LTS cannot honour refuse here rather than fall back.
+    READ_OPTIONAL("solver", "time_stepper", {{ project_upper }}_TIME_STEPPER);
+    if ({{ project_upper }}_TIME_STEPPER != "global" &&
+        {{ project_upper }}_TIME_STEPPER != "lts") {
+        if (rank == 0)
+            std::cerr << RED << "UNSUPPORTED PARAMETER VALUE: [solver] time_stepper = \""
+                      << {{ project_upper }}_TIME_STEPPER << "\"" << NRM << std::endl
+                      << "\tthis solver implements: \"global\" \"lts\"" << std::endl;
+        throw std::runtime_error("Unsupported value for parameter: [solver] time_stepper");
+    }
+    READ_OPTIONAL("lts", "iface", {{ project_upper }}_LTS_IFACE);
+    require_supported("[lts] iface", {{ project_upper }}_LTS_IFACE, {3, 15},
+                      "3 = third order at level interfaces, 15 = fourth order.", rank);
+    READ_OPTIONAL("lts", "g_exchange", {{ project_upper }}_LTS_G_EXCHANGE);
+    READ_OPTIONAL("lts", "ratio_cap", {{ project_upper }}_LTS_RATIO_CAP);
+    READ_OPTIONAL("lts", "rate_c", {{ project_upper }}_LTS_RATE_C);
+    if (!({{ project_upper }}_LTS_RATE_C > 0.0)) {
+        if (rank == 0)
+            std::cerr << RED << "UNSUPPORTED PARAMETER VALUE: [lts] rate_c = "
+                      << {{ project_upper }}_LTS_RATE_C << NRM << std::endl
+                      << "\tmust be positive" << std::endl;
+        throw std::runtime_error("Unsupported value for parameter: [lts] rate_c");
+    }
+    READ_OPTIONAL("lts", "wpart", {{ project_upper }}_LTS_WPART);
+    READ_OPTIONAL("lts", "partitioning_method", {{ project_upper }}_PARTITIONING_METHOD);
+    require_supported("[lts] partitioning_method", {{ project_upper }}_PARTITIONING_METHOD, {0},
+                      "0 = SFC; the labelled partitions need the is_labelled hooks, "
+                      "which are not generated yet.", rank);
+{% if enable_bh_tracking %}
+    READ_OPTIONAL("lts", "fixed_punctures", {{ project_upper }}_LTS_FIXED_PUNCTURES);
+{% endif %}
+    if ({{ project_upper }}_TIME_STEPPER == "lts") {
+        require_supported("[solver] rk_type under time_stepper = \"lts\"",
+                          {{ project_upper }}_RK_TYPE, {RKType::RK3, RKType::RK4},
+                          "the LTS stepper is derived for RK3 and RK4 only.", rank);
+{% if lts_value_boundary_ids %}
+        for (int vid : { {{- lts_value_boundary_ids | join(', ') -}} })
+            if ({{ project_upper }}_BOUNDARY_MODE_ID == vid) {
+                if (rank == 0)
+                    std::cerr << RED << "UNSUPPORTED PARAMETER VALUE: [boundary] mode = \""
+                              << {{ project_upper }}_BOUNDARY_MODE << "\" under time_stepper = \"lts\""
+                              << NRM << std::endl
+                              << "\tvalue-form boundary modes act on the zipped vector inside "
+                                 "rhs(), which LTS has no point for." << std::endl;
+                throw std::runtime_error("Unsupported boundary mode under LTS");
+            }
+{% endif %}
+{% if enable_bh_tracking %}
+        if (!{{ project_upper }}_LTS_FIXED_PUNCTURES) {
+            if (rank == 0)
+                std::cerr << RED << "UNSUPPORTED: puncture tracking is not generated under "
+                          << "time_stepper = \"lts\"" << NRM << std::endl
+                          << "\tset [lts] fixed_punctures = true to keep the punctures at "
+                             "their initial BH_LOC (single static black hole)." << std::endl;
+            throw std::runtime_error("Puncture tracking is not supported under LTS");
+        }
+{% endif %}
+    }
+{% endif %}
 
 {% if use_dendro_derivs %}
     // [derivatives] -- see dendrolib's derivs_factory.h for valid type names
@@ -1156,6 +1235,20 @@ void dumpParamFile(std::ostream& sout, int root, MPI_Comm comm) {
 {% if boundary_modes %}
     sout << "\n[boundary]" << std::endl;
     sout << "mode = \"" << {{ project_upper }}_BOUNDARY_MODE << "\"" << std::endl;
+{% endif %}
+{% if enable_lts %}
+
+    sout << "\n[lts]" << std::endl;
+    sout << "time_stepper = \"" << {{ project_upper }}_TIME_STEPPER << "\"" << std::endl;
+    sout << "iface = " << {{ project_upper }}_LTS_IFACE << std::endl;
+    sout << "g_exchange = " << ({{ project_upper }}_LTS_G_EXCHANGE ? "true" : "false") << std::endl;
+    sout << "ratio_cap = " << {{ project_upper }}_LTS_RATIO_CAP << std::endl;
+    sout << "rate_c = " << {{ project_upper }}_LTS_RATE_C << std::endl;
+    sout << "wpart = " << ({{ project_upper }}_LTS_WPART ? "true" : "false") << std::endl;
+    sout << "partitioning_method = " << {{ project_upper }}_PARTITIONING_METHOD << std::endl;
+{% if enable_bh_tracking %}
+    sout << "fixed_punctures = " << ({{ project_upper }}_LTS_FIXED_PUNCTURES ? "true" : "false") << std::endl;
+{% endif %}
 {% endif %}
 
 {% if use_dendro_derivs %}

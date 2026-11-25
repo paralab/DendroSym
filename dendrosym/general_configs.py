@@ -101,6 +101,14 @@ SOLVER_FEATURES = {
         "binary, and the TwoPunctures sources from dendrolib. Pair it with "
         "tpid_writer, naming the project's PunctureVarsWriter.",
     ),
+    "enable_lts": (
+        False,
+        "Local time stepping: also generate the ts::ExplicitNUTS solver "
+        "contract (rhs_blk, the block hooks, compute_lts_ts_offset, "
+        "on_mesh_changed) and the LTS driver, selected at run time by "
+        "[solver] time_stepper = \"lts\". Audit the equations first with "
+        "dendrosym.lts_audit.",
+    ),
     "enable_jax_emit": (
         False,
         "Also render the DendroJAX backend (a Python package importing "

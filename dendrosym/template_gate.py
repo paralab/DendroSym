@@ -43,6 +43,7 @@ GUARD_FLAGS = (
     "enable_gw_extraction",
     "enable_ah",
     "enable_profiling",
+    "enable_lts",
     "use_dendro_derivs",
 )
 

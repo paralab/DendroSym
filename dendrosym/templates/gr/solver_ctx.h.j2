@@ -27,6 +27,9 @@
 #include "rhs.h"
 #include "physcon.h"
 #include "{{ project_name }}_constraints.h"
+{% if enable_lts %}
+#include "{{ lts.helpers_header }}"
+{% endif %}
 {% if boundary_value_modes %}
 #include "boundary_conditions.h"
 {% endif %}
@@ -74,6 +77,10 @@ class {{ project_upper }}Ctx : public ts::Ctx<{{ project_upper }}Ctx, DendroScal
     double m_preEnforceMin[NUM_ENFORCEMENT_MONITORS];
 
 {% endif %}
+{% if enable_lts %}
+    int m_restoredSlot = -1;
+
+{% endif %}
     // State flags
     bool m_bConstraintsComputed;
     // checkpoint restore guard: initialize() is invoked twice (once directly,
@@ -119,6 +126,30 @@ class {{ project_upper }}Ctx : public ts::Ctx<{{ project_upper }}Ctx, DendroScal
     int post_timestep_blk(DendroScalar *unzipIn, DendroScalar *unzipOut,
                           unsigned int *blkIDs, unsigned int numBlocks,
                           DendroScalar *blk_dx);
+{% if enable_lts %}
+
+    // ---- LTS solver contract ({{ lts.stepper }}; dendrolib docs/lts_solver_contract.md) ----
+    // Not lts_thread_safe: the derivative workspace is one shared buffer{{ " and m_preEnforceMin is shared mutable state" if enforcement_monitors }}.
+    ts::{{ lts.block_view }} block_view(unsigned int blk) const;
+    int rhs_blk(const DendroScalar *in, DendroScalar *out, unsigned int dof,
+                unsigned int blk, DendroScalar t);
+    int pre_stage_blk(DendroScalar *in, unsigned int dof, unsigned int blk,
+                      DendroScalar t);
+    int post_stage_blk(DendroScalar *in, unsigned int dof, unsigned int blk,
+                       DendroScalar t);
+    int pre_timestep_blk(DendroScalar *in, unsigned int dof, unsigned int blk,
+                         DendroScalar t);
+    int post_timestep_blk(DendroScalar *in, unsigned int dof, unsigned int blk,
+                          DendroScalar t);
+    void on_mesh_changed(bool remeshed);
+    unsigned int compute_lts_ts_offset();
+    /** Pointwise enforcement on one padded block (what post_timestep does zipped). */
+    void enforce_blk(DendroScalar *in, unsigned int dof, unsigned int blk);
+    /** Ghost-exchange batch size. The CRTP base forwards to the leaf, so a leaf without it recurses forever. */
+    unsigned int get_async_batch_sz() { return {{ project_upper }}_ASYNC_COMM_K; }
+    /** Checkpoint slot restore_checkpt read, or -1 (the g history sits beside it). */
+    int restored_checkpt_slot() const { return m_restoredSlot; }
+{% endif %}
 
     // ---- Constraint computation ----
     void compute_constraint_variables();
@@ -150,7 +181,7 @@ class {{ project_upper }}Ctx : public ts::Ctx<{{ project_upper }}Ctx, DendroScal
     void calculate_full_grid_size();
 
     // ---- Checkpointing ----
-    int write_checkpt();
+    int write_checkpt({{ "int slot_override = -1" if enable_lts }});
     int restore_checkpt();
 
 {% if enable_bh_tracking %}
@@ -165,7 +196,7 @@ class {{ project_upper }}Ctx : public ts::Ctx<{{ project_upper }}Ctx, DendroScal
     // ---- Accessors ----
     DVec &get_evolution_vars() { return m_var[VL::CPU_EV]; }
     DVec &get_constraint_vars() { return m_var[VL::CPU_CV]; }
-    ot::Mesh *get_mesh() { return m_uiMesh; }
+    ot::Mesh *get_mesh() {{ "const " if enable_lts }}{ return m_uiMesh; }
 
     void prepare_for_next_iter();
 };

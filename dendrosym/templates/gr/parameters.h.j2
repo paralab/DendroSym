@@ -120,6 +120,20 @@ extern unsigned int {{ project_upper }}_RK_TYPE;
 extern double {{ project_upper }}_RK45_TIME_STEP_SIZE;
 extern double {{ project_upper }}_RK45_DESIRED_TOL;
 extern double {{ project_upper }}_CFL_FACTOR;
+{% if enable_lts %}
+
+// local time stepping: [solver] time_stepper and [lts]
+extern std::string {{ project_upper }}_TIME_STEPPER;
+extern unsigned int {{ project_upper }}_LTS_IFACE;
+extern bool {{ project_upper }}_LTS_G_EXCHANGE;
+extern unsigned int {{ project_upper }}_LTS_RATIO_CAP;
+extern double {{ project_upper }}_LTS_RATE_C;
+extern bool {{ project_upper }}_LTS_WPART;
+extern unsigned int {{ project_upper }}_PARTITIONING_METHOD;
+{% if enable_bh_tracking %}
+extern bool {{ project_upper }}_LTS_FIXED_PUNCTURES;
+{% endif %}
+{% endif %}
 
 // I/O
 extern unsigned int {{ project_upper }}_IO_OUTPUT_FREQ;

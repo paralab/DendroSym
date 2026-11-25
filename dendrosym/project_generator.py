@@ -1217,6 +1217,8 @@ def build_template_map(ctx):
         f"solver/src/{ctx['project_name']}Ctx.cpp": "gr/solver_ctx.cpp.j2",
         "solver/src/grUtils.cpp": "gr/grUtils.cpp.j2",
         f"solver/{ctx['project_name']}_main.cpp": "gr/main.cpp.j2",
+        **({f"solver/include/{ctx['project_name']}_lts_driver.h": "gr/lts_driver.h.j2"}
+           if ctx.get("enable_lts") else {}),
         # sample parameter file (at project root for easy access)
         f"{ctx['project_name']}_parameters.sample.toml": "gr/sample_params.toml.j2",
         # newcomer orientation: pipeline, quickstart, where-things-live
@@ -1725,7 +1727,54 @@ class DendroProjectGenerator:
                                  "(`exact`), not both")
             ctx["enable_analytical"] = True
 
+        ctx["enable_lts"] = bool(getattr(c, "enable_lts", False))
+        if ctx["enable_lts"]:
+            self._lts_context(ctx, c)
+
         return ctx
+
+    def _lts_context(self, ctx, c):
+        """Template context for the LTS contract; refuses what LTS cannot run.
+
+        The audit reads the equations once. A constraint read or a dt term makes
+        generation fail: inside a coarse step the constraints are stale and no
+        single dt exists. Stiff rates become the C++ bound in
+        compute_lts_ts_offset.
+        """
+        from dendrosym import lts_audit
+        from dendrosym.lts_names import LTS_NAMES
+
+        audit = lts_audit.audit(c)
+        if not audit.clean or audit.indeterminate:
+            raise ValueError(
+                "enable_lts: the equations cannot run under local time stepping "
+                "as written:\n" + audit.summary()
+            )
+
+        by_name = {p["var_name"]: p for p in ctx["physics_params"]}
+
+        def cpp_name(sym_name):
+            base, _, rest = sym_name.partition("[")
+            if base not in by_name:
+                raise ValueError(
+                    f"enable_lts: stiff-rate symbol {sym_name!r} is not a "
+                    f"physics parameter"
+                )
+            idx = "[" + rest if rest else ""
+            return f"static_cast<double>({by_name[base]['cpp_var']}{idx})"
+
+        rates = []
+        for r in audit.stiff_rates:
+            code = lts_audit.rate_cpp(r, cpp_name)
+            if code not in rates:
+                rates.append(code)
+
+        ctx["lts"] = LTS_NAMES
+        ctx["lts_rates"] = rates
+        ctx["lts_audit_summary"] = audit.summary().splitlines()
+        ctx["lts_value_boundary_ids"] = [
+            m["id"] for m in ctx.get("boundary_value_modes", [])
+        ]
 
     def _boundary_modes(self, ctx, c, cprinter, param_subs, t_sym):
         """Outer boundary modes (dendrosym.bc) -> one C++ block per mode for the
